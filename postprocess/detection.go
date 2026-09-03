@@ -77,17 +77,19 @@ func DetectDETR(logits, boxes []float32, imageSize image.Point, options Detectio
 		if boxValues[2] < 0 || boxValues[3] < 0 {
 			return nil, fmt.Errorf("postprocess: box %d has a negative dimension", boxIndex)
 		}
-		scores, err := math32.Softmax(logits[boxIndex*classCount : (boxIndex+1)*classCount])
+		class, score, err := math32.SoftmaxArgMax(
+			logits[boxIndex*classCount:(boxIndex+1)*classCount],
+			noObjectClass,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("postprocess: box %d: %w", boxIndex, err)
 		}
-		class := math32.TopK(scores[:noObjectClass], 1)[0]
 		label, ok := options.Labels[class]
-		if !ok || scores[class] < options.MinScore {
+		if !ok || score < options.MinScore {
 			continue
 		}
 		box := normalizedBox(boxValues, imageSize)
-		detections = append(detections, Detection{Class: class, Label: label, Score: scores[class], Box: box})
+		detections = append(detections, Detection{Class: class, Label: label, Score: score, Box: box})
 	}
 
 	if options.ApplyNMS {

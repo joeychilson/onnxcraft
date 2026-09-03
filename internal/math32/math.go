@@ -62,6 +62,49 @@ func SoftmaxInto(destination, logits []float32) ([]float32, error) {
 	return destination, nil
 }
 
+// SoftmaxArgMax returns the highest-logit index among the first candidateCount
+// values and its probability after softmax normalization over every logit.
+func SoftmaxArgMax(logits []float32, candidateCount int) (int, float32, error) {
+	if len(logits) == 0 {
+		return 0, 0, errors.New("math32: logits cannot be empty")
+	}
+	if candidateCount < 1 || candidateCount > len(logits) {
+		return 0, 0, errors.New("math32: candidate count is out of range")
+	}
+	maximum := float32(math.Inf(-1))
+	positiveInfinities := 0
+	best := 0
+	for index, logit := range logits {
+		if math.IsNaN(float64(logit)) {
+			return 0, 0, errors.New("math32: logits contain NaN")
+		}
+		if math.IsInf(float64(logit), 1) {
+			positiveInfinities++
+		}
+		if logit > maximum {
+			maximum = logit
+		}
+		if index < candidateCount && logit > logits[best] {
+			best = index
+		}
+	}
+	if positiveInfinities > 0 {
+		if math.IsInf(float64(logits[best]), 1) {
+			return best, 1 / float32(positiveInfinities), nil
+		}
+		return best, 0, nil
+	}
+	if math.IsInf(float64(maximum), -1) {
+		return 0, 0, errors.New("math32: all logits are negative infinity")
+	}
+	var sum float64
+	for _, logit := range logits {
+		sum += math.Exp(float64(logit - maximum))
+	}
+	probability := math.Exp(float64(logits[best]-maximum)) / sum
+	return best, float32(probability), nil
+}
+
 // TopK returns the indices of the largest values in descending, stable order.
 func TopK(values []float32, count int) []int {
 	count = min(max(count, 0), len(values))

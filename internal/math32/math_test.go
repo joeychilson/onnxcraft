@@ -57,6 +57,25 @@ func TestSoftmaxIntoReusesDestination(t *testing.T) {
 	}
 }
 
+func TestSoftmaxArgMaxNormalizesAcrossAllClasses(t *testing.T) {
+	t.Parallel()
+	index, probability, err := SoftmaxArgMax([]float32{2, 1, 3}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Softmax([]float32{2, 1, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 0 || probability != want[0] {
+		t.Fatalf("SoftmaxArgMax() = %d, %v; want 0, %v", index, probability, want[0])
+	}
+	index, probability, err = SoftmaxArgMax([]float32{float32(math.Inf(1)), 0, float32(math.Inf(1))}, 2)
+	if err != nil || index != 0 || probability != 0.5 {
+		t.Fatalf("SoftmaxArgMax(Inf) = %d, %v, %v", index, probability, err)
+	}
+}
+
 func TestTopKIsStableAndBounded(t *testing.T) {
 	t.Parallel()
 	if got := TopK([]float32{3, 3, 1}, 8); !slices.Equal(got, []int{0, 1, 2}) {
@@ -125,6 +144,18 @@ func BenchmarkSoftmax(b *testing.B) {
 	destination := make([]float32, len(values))
 	for b.Loop() {
 		if _, err := SoftmaxInto(destination, values); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSoftmaxArgMax(b *testing.B) {
+	values := make([]float32, 92)
+	for index := range values {
+		values[index] = float32(index) / 92
+	}
+	for b.Loop() {
+		if _, _, err := SoftmaxArgMax(values, 91); err != nil {
 			b.Fatal(err)
 		}
 	}
