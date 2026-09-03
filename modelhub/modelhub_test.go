@@ -55,6 +55,48 @@ func TestFetchDownloadsVerifiesAndCaches(t *testing.T) {
 	}
 }
 
+func TestFetchSendsHeadersAndReportsProgress(t *testing.T) {
+	t.Parallel()
+	contents := []byte("verified model")
+	digest := sha256.Sum256(contents)
+	var progress []Progress
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		return response(contents), nil
+	})}
+	client, err := New(
+		WithCacheDir(t.TempDir()),
+		WithHTTPClient(httpClient),
+		WithRequestHeader("Authorization", "Bearer token"),
+		WithProgress(func(update Progress) { progress = append(progress, update) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := Artifact{
+		Name: "model.onnx", URL: "https://example.com/model.onnx",
+		SHA256: hex.EncodeToString(digest[:]), Size: int64(len(contents)),
+	}
+	if _, err := client.Fetch(t.Context(), artifact); err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) < 2 {
+		t.Fatalf("progress updates = %d, want at least 2", len(progress))
+	}
+	last := progress[len(progress)-1]
+	if last.Downloaded != int64(len(contents)) || last.Total != int64(len(contents)) || last.Attempt != 1 {
+		t.Fatalf("last progress = %+v", last)
+	}
+	if _, err := New(WithRequestHeader("Bad Header", "value")); err == nil {
+		t.Fatal("New() accepted an invalid request header")
+	}
+	if _, err := New(WithProgress(nil)); err == nil {
+		t.Fatal("New() accepted a nil progress callback")
+	}
+}
+
 func TestFetchRejectsBadDigest(t *testing.T) {
 	t.Parallel()
 	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -125,7 +167,9 @@ func TestHuggingFaceArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/dfa9feb5cece5be2cc8fc23a3cf1f32473a9d56f/onnx/model.onnx"
-	if artifact.URL != want || artifact.Name != "model.onnx" {
+	if artifact.URL != want || artifact.Name != "model.onnx" ||
+		artifact.Repository != "sentence-transformers/all-MiniLM-L6-v2" ||
+		artifact.Revision != "dfa9feb5cece5be2cc8fc23a3cf1f32473a9d56f" {
 		t.Fatalf("artifact = %+v", artifact)
 	}
 	if _, err := HuggingFace("invalid", "main", "model.onnx", artifact.SHA256, 1); err == nil {
@@ -332,6 +376,9 @@ func TestCatalogArtifactsAreValidAndPinned(t *testing.T) {
 		}
 		if artifact.Size < 1 || !strings.Contains(artifact.URL, "/resolve/") {
 			t.Errorf("artifact is not pinned: %+v", artifact)
+		}
+		if artifact.Repository == "" || len(artifact.Revision) != 40 || artifact.License == "" {
+			t.Errorf("artifact provenance is incomplete: %+v", artifact)
 		}
 	}
 }

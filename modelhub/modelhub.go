@@ -49,11 +49,27 @@ func (e *HTTPError) Error() string {
 
 // Artifact identifies one immutable model file.
 type Artifact struct {
-	Name   string
-	URL    string
-	SHA256 string
-	Size   int64
+	Name       string
+	URL        string
+	SHA256     string
+	Size       int64
+	Repository string
+	Revision   string
+	License    string
 }
+
+// Progress reports the state of one download attempt. Total is -1 when the
+// server and artifact metadata do not provide a size. Attempt is one-based.
+type Progress struct {
+	Artifact   Artifact
+	Downloaded int64
+	Total      int64
+	Attempt    int
+}
+
+// ProgressFunc receives download progress. FetchAll and FetchBundle may call
+// it concurrently, so implementations must be safe for concurrent use.
+type ProgressFunc func(Progress)
 
 // Bundle groups artifacts that must share a directory, such as an ONNX graph
 // and its external tensor data.
@@ -78,6 +94,8 @@ type clientConfig struct {
 	maxSize     int64
 	concurrency int
 	retries     int
+	headers     http.Header
+	progress    ProgressFunc
 }
 
 // Client downloads verified model artifacts into a local cache.
@@ -88,6 +106,8 @@ type Client struct {
 	maxSize     int64
 	concurrency int
 	retries     int
+	headers     http.Header
+	progress    ProgressFunc
 }
 
 var artifactLocks = struct {
@@ -164,6 +184,35 @@ func WithRetries(count int) Option {
 	}
 }
 
+// WithRequestHeader adds a header to artifact download requests. It is useful
+// for authentication against private model registries.
+func WithRequestHeader(name, value string) Option {
+	return func(config *clientConfig) error {
+		if !validHeaderName(name) {
+			return errors.New("modelhub: invalid request header name")
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return errors.New("modelhub: invalid request header value")
+		}
+		if config.headers == nil {
+			config.headers = make(http.Header)
+		}
+		config.headers.Set(name, value)
+		return nil
+	}
+}
+
+// WithProgress registers a callback for download progress.
+func WithProgress(progress ProgressFunc) Option {
+	return func(config *clientConfig) error {
+		if progress == nil {
+			return errors.New("modelhub: progress callback cannot be nil")
+		}
+		config.progress = progress
+		return nil
+	}
+}
+
 // New creates a model artifact client.
 func New(options ...Option) (*Client, error) {
 	config := clientConfig{
@@ -198,6 +247,8 @@ func New(options ...Option) (*Client, error) {
 		maxSize:     config.maxSize,
 		concurrency: config.concurrency,
 		retries:     config.retries,
+		headers:     config.headers.Clone(),
+		progress:    config.progress,
 	}, nil
 }
 
@@ -223,10 +274,12 @@ func HuggingFace(repository, revision, file, digest string, size int64) (Artifac
 		parts[index] = url.PathEscape(parts[index])
 	}
 	artifact := Artifact{
-		Name:   fileParts[len(fileParts)-1],
-		URL:    "https://huggingface.co/" + strings.Join(parts, "/"),
-		SHA256: digest,
-		Size:   size,
+		Name:       fileParts[len(fileParts)-1],
+		URL:        "https://huggingface.co/" + strings.Join(parts, "/"),
+		SHA256:     digest,
+		Size:       size,
+		Repository: repository,
+		Revision:   revision,
 	}
 	if _, err := validateArtifact(artifact); err != nil {
 		return Artifact{}, err
@@ -482,7 +535,7 @@ func replaceDirectory(source, target string) error {
 
 func (c *Client) download(ctx context.Context, artifact Artifact, digest, target string) error {
 	for attempt := 0; ; attempt++ {
-		err := c.downloadOnce(ctx, artifact, digest, target)
+		err := c.downloadOnce(ctx, artifact, digest, target, attempt+1)
 		if err == nil {
 			return nil
 		}
@@ -517,11 +570,17 @@ func (e *retryableDownloadError) Unwrap() error {
 	return e.err
 }
 
-func (c *Client) downloadOnce(ctx context.Context, artifact Artifact, digest, target string) (resultErr error) {
+func (c *Client) downloadOnce(
+	ctx context.Context,
+	artifact Artifact,
+	digest, target string,
+	attempt int,
+) (resultErr error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
 	if err != nil {
 		return fmt.Errorf("modelhub: create request: %w", err)
 	}
+	request.Header = c.headers.Clone()
 	response, err := c.client.Do(request)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -556,7 +615,22 @@ func (c *Client) downloadOnce(ctx context.Context, artifact Artifact, digest, ta
 	}()
 
 	hasher := sha256.New()
-	written, copyErr := copyLimited(temporary, hasher, response.Body, c.maxSize)
+	writer := io.Writer(temporary)
+	if c.progress != nil {
+		total := response.ContentLength
+		if artifact.Size > 0 {
+			total = artifact.Size
+		}
+		c.progress(Progress{Artifact: artifact, Total: total, Attempt: attempt})
+		writer = &progressWriter{
+			writer:   temporary,
+			artifact: artifact,
+			total:    total,
+			attempt:  attempt,
+			progress: c.progress,
+		}
+	}
+	written, copyErr := copyLimited(writer, hasher, response.Body, c.maxSize)
 	if copyErr == nil {
 		copyErr = temporary.Sync()
 	}
@@ -581,6 +655,29 @@ func (c *Client) downloadOnce(ctx context.Context, artifact Artifact, digest, ta
 		return fmt.Errorf("modelhub: cache artifact: %w", err)
 	}
 	return nil
+}
+
+type progressWriter struct {
+	writer     io.Writer
+	artifact   Artifact
+	total      int64
+	attempt    int
+	downloaded int64
+	progress   ProgressFunc
+}
+
+func (w *progressWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	w.downloaded += int64(written)
+	if written > 0 {
+		w.progress(Progress{
+			Artifact:   w.artifact,
+			Downloaded: w.downloaded,
+			Total:      w.total,
+			Attempt:    w.attempt,
+		})
+	}
+	return written, err
 }
 
 func retryableStatus(status int) bool {
@@ -629,6 +726,20 @@ func validateArtifact(artifact Artifact) (string, error) {
 
 func safeFileName(name string) bool {
 	return name != "" && name == filepath.Base(name) && name != "." && name != ".." && !strings.ContainsAny(name, `/\\`)
+}
+
+func validHeaderName(name string) bool {
+	if name == "" || strings.EqualFold(name, "Host") || strings.EqualFold(name, "Content-Length") {
+		return false
+	}
+	for _, character := range []byte(name) {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validFile(path string, artifact Artifact, digest string) (valid bool, resultErr error) {
