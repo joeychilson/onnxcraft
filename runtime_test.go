@@ -31,6 +31,18 @@ func TestOpenOfflineCacheMiss(t *testing.T) {
 	}
 }
 
+func TestExecutionProviderDevicesRejectsInvalidRuntime(t *testing.T) {
+	t.Parallel()
+	var runtime *Runtime
+	if _, err := runtime.ExecutionProviderDevices(); err == nil {
+		t.Fatal("ExecutionProviderDevices() accepted a nil runtime")
+	}
+	runtime = &Runtime{closed: true}
+	if _, err := runtime.ExecutionProviderDevices(); err == nil {
+		t.Fatal("ExecutionProviderDevices() accepted a closed runtime")
+	}
+}
+
 func TestValidateLibraryResolvesSymlinks(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -84,6 +96,15 @@ func TestRuntimeIntegration(t *testing.T) {
 	}
 	if version != RuntimeVersion {
 		t.Fatalf("LoadedVersion() = %q, want %q", version, RuntimeVersion)
+	}
+	devices, err := runtime.ExecutionProviderDevices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, device := range devices {
+		if device.Provider == "" {
+			t.Fatalf("ExecutionProviderDevices() returned an empty provider: %+v", device)
+		}
 	}
 
 	modelData, err := base64.StdEncoding.DecodeString(sumModelBase64)

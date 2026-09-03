@@ -38,6 +38,13 @@ type RuntimeInfo struct {
 	Arch        string
 }
 
+// ExecutionProviderDevice describes one hardware target advertised by an
+// execution-provider plugin registered with ONNX Runtime.
+type ExecutionProviderDevice struct {
+	Provider string
+	Vendor   string
+}
+
 // RuntimeOption configures Open.
 type RuntimeOption func(*runtimeConfig) error
 
@@ -192,6 +199,32 @@ func (r *Runtime) LoadedVersion() (string, error) {
 		return "", errors.New("infergo: runtime is closed")
 	}
 	return r.loadedVersion, nil
+}
+
+// ExecutionProviderDevices returns the hardware targets currently advertised
+// by registered execution-provider plugins. The returned values are detached
+// from ONNX Runtime and remain safe to use after Runtime is closed.
+func (r *Runtime) ExecutionProviderDevices() ([]ExecutionProviderDevice, error) {
+	if r == nil {
+		return nil, errors.New("infergo: nil runtime")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil, errors.New("infergo: runtime is closed")
+	}
+	raw, err := ort.GetEpDevices()
+	if err != nil {
+		return nil, fmt.Errorf("infergo: discover execution-provider devices: %w", err)
+	}
+	devices := make([]ExecutionProviderDevice, len(raw))
+	for index, device := range raw {
+		devices[index] = ExecutionProviderDevice{
+			Provider: device.EpName(),
+			Vendor:   device.EpVendor(),
+		}
+	}
+	return devices, nil
 }
 
 // Close releases this Runtime's reference to the native environment.
