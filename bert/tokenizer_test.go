@@ -103,6 +103,9 @@ func TestTokenizerRejectsInvalidLength(t *testing.T) {
 	if _, err := tokenizer.Encode("text", 1); err == nil {
 		t.Fatal("Encode() error = nil")
 	}
+	if _, err := tokenizer.Encode("text", maxSequenceLength+1); err == nil {
+		t.Fatal("Encode(oversized) error = nil")
+	}
 }
 
 func TestTokenizerLoadsCustomCasedVocabulary(t *testing.T) {
@@ -137,5 +140,60 @@ func TestTokenizerEncodesDynamicBatch(t *testing.T) {
 	if batch.BatchSize != 2 || batch.SequenceLength != 4 || len(batch.IDs) != 8 ||
 		!slices.Equal(batch.AttentionMask, []int64{1, 1, 1, 0, 1, 1, 1, 1}) {
 		t.Fatalf("batch = %+v", batch)
+	}
+}
+
+func TestTokenizerRejectsBlankVocabularyLines(t *testing.T) {
+	t.Parallel()
+	vocabulary := "[PAD]\n[UNK]\n\n[CLS]\n[SEP]\n[MASK]"
+	if _, err := NewTokenizerFromReader(strings.NewReader(vocabulary)); err == nil {
+		t.Fatal("NewTokenizerFromReader() error = nil")
+	}
+}
+
+func TestTokenizerMatchesLongCustomSpecialToken(t *testing.T) {
+	t.Parallel()
+	special := SpecialTokens{
+		Padding: "<padding-token-long>", Unknown: "<unknown-token-long>",
+		Classifier: "<classifier-token-long>", Separator: "<separator-token-long>",
+		Mask: "<mask-token-long>",
+	}
+	vocabulary := strings.Join([]string{
+		special.Padding, special.Unknown, special.Classifier, special.Separator, special.Mask, "hello",
+	}, "\n")
+	tokenizer, err := NewTokenizerFromReader(strings.NewReader(vocabulary), WithSpecialTokens(special))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoding, err := tokenizer.Encode("hello <MASK-TOKEN-LONG>", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(encoding.Tokens, []string{special.Classifier, "hello", special.Mask, special.Separator}) {
+		t.Fatalf("tokens = %q", encoding.Tokens)
+	}
+}
+
+func TestTokenizerDropsUnicodeFormatControls(t *testing.T) {
+	t.Parallel()
+	tokenizer, err := NewTokenizer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoding, err := tokenizer.Encode("hello\u200eworld", 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(encoding.Tokens, []string{"[CLS]", "hello", "##world", "[SEP]"}) {
+		t.Fatalf("tokens = %q", encoding.Tokens)
+	}
+}
+
+func TestSpecialTokensRejectCaseFoldedDuplicates(t *testing.T) {
+	t.Parallel()
+	tokens := DefaultSpecialTokens()
+	tokens.Mask = "[pad]"
+	if err := WithSpecialTokens(tokens)(&tokenizerConfig{}); err == nil {
+		t.Fatal("WithSpecialTokens() error = nil")
 	}
 }

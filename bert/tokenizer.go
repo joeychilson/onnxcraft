@@ -17,7 +17,15 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-const maxInputCharactersPerWord = 100
+const (
+	maxInputCharactersPerWord = 100
+	maxSequenceLength         = 1 << 20
+)
+
+type specialToken struct {
+	value string
+	runes []rune
+}
 
 //go:embed vocab.txt
 var vocabularyFS embed.FS
@@ -49,12 +57,13 @@ type BatchEncoding struct {
 
 // Tokenizer implements uncased BERT basic and WordPiece tokenization.
 type Tokenizer struct {
-	vocabulary   map[string]int
-	tokens       []string
-	special      SpecialTokens
-	specialMap   map[string]string
-	lowercase    bool
-	stripAccents bool
+	vocabulary    map[string]int
+	tokens        []string
+	special       SpecialTokens
+	specialMap    map[string]string
+	specialTokens []specialToken
+	lowercase     bool
+	stripAccents  bool
 }
 
 // TokenizerOption configures WordPiece tokenization.
@@ -81,9 +90,14 @@ func DefaultSpecialTokens() SpecialTokens {
 func WithSpecialTokens(tokens SpecialTokens) TokenizerOption {
 	return func(config *tokenizerConfig) error {
 		values := [...]string{tokens.Padding, tokens.Unknown, tokens.Classifier, tokens.Separator, tokens.Mask}
-		for _, token := range values {
+		for index, token := range values {
 			if token == "" {
 				return errors.New("bert: special token cannot be empty")
+			}
+			for _, previous := range values[:index] {
+				if strings.EqualFold(token, previous) {
+					return fmt.Errorf("bert: duplicate special token %q", token)
+				}
 			}
 		}
 		config.special = tokens
@@ -153,10 +167,10 @@ func NewTokenizerFromReader(reader io.Reader, options ...TokenizerOption) (*Toke
 	vocabulary := make(map[string]int)
 	tokens := make([]string, 0)
 	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
+	for line := 1; scanner.Scan(); line++ {
 		token := scanner.Text()
 		if token == "" {
-			continue
+			return nil, fmt.Errorf("bert: vocabulary line %d is empty", line)
 		}
 		if _, exists := vocabulary[token]; exists {
 			return nil, fmt.Errorf("bert: duplicate vocabulary token %q", token)
@@ -181,13 +195,21 @@ func NewTokenizerFromReader(reader io.Reader, options ...TokenizerOption) (*Toke
 		strings.ToUpper(special.Separator):  special.Separator,
 		strings.ToUpper(special.Mask):       special.Mask,
 	}
+	specialTokens := make([]specialToken, 0, len(specialMap))
+	for _, value := range specialMap {
+		specialTokens = append(specialTokens, specialToken{value: value, runes: []rune(value)})
+	}
+	slices.SortFunc(specialTokens, func(left, right specialToken) int {
+		return len(right.runes) - len(left.runes)
+	})
 	return &Tokenizer{
-		vocabulary:   vocabulary,
-		tokens:       tokens,
-		special:      special,
-		specialMap:   specialMap,
-		lowercase:    config.lowercase,
-		stripAccents: config.stripAccents,
+		vocabulary:    vocabulary,
+		tokens:        tokens,
+		special:       special,
+		specialMap:    specialMap,
+		specialTokens: specialTokens,
+		lowercase:     config.lowercase,
+		stripAccents:  config.stripAccents,
 	}, nil
 }
 
@@ -199,6 +221,9 @@ func (t *Tokenizer) Encode(text string, maxLength int) (Encoding, error) {
 	}
 	if maxLength < 2 {
 		return Encoding{}, errors.New("bert: maximum length must be at least two")
+	}
+	if maxLength > maxSequenceLength {
+		return Encoding{}, fmt.Errorf("bert: maximum length exceeds %d", maxSequenceLength)
 	}
 	wordPieces := make([]string, 0)
 	for _, token := range t.basicTokens(text) {
@@ -373,26 +398,17 @@ func (t *Tokenizer) basicTokens(text string) []string {
 
 	for index := 0; index < len(runes); index++ {
 		character := runes[index]
-		if character == '[' {
-			end := index + 1
-			for end < len(runes) && end-index <= 16 && runes[end] != ']' {
-				end++
-			}
-			if end < len(runes) && runes[end] == ']' {
-				candidate := string(runes[index : end+1])
-				if special, ok := t.specialMap[strings.ToUpper(candidate)]; ok {
-					flush()
-					tokens = append(tokens, special)
-					index = end
-					continue
-				}
-			}
+		if special, length, ok := t.matchSpecial(runes[index:]); ok {
+			flush()
+			tokens = append(tokens, special)
+			index += length - 1
+			continue
 		}
 		switch {
 		case unicode.IsSpace(character):
 			flush()
-		case unicode.IsControl(character) || character == utf8.RuneError:
-			flush()
+		case isControl(character) || character == utf8.RuneError:
+			continue
 		case unicode.IsPunct(character) || isCJK(character):
 			flush()
 			tokens = append(tokens, t.normalize(string(character)))
@@ -402,6 +418,25 @@ func (t *Tokenizer) basicTokens(text string) []string {
 	}
 	flush()
 	return tokens
+}
+
+func (t *Tokenizer) matchSpecial(remaining []rune) (string, int, bool) {
+	for _, token := range t.specialTokens {
+		if len(remaining) < len(token.runes) {
+			continue
+		}
+		if strings.EqualFold(string(remaining[:len(token.runes)]), token.value) {
+			return token.value, len(token.runes), true
+		}
+	}
+	return "", 0, false
+}
+
+func isControl(character rune) bool {
+	if unicode.IsControl(character) || unicode.In(character, unicode.Cf, unicode.Co, unicode.Cs) {
+		return true
+	}
+	return !unicode.IsGraphic(character) && !unicode.IsSpace(character)
 }
 
 func (t *Tokenizer) wordPiece(token string) []string {
