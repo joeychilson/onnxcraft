@@ -59,6 +59,17 @@ type Tensor struct {
 // NewTensor constructs a tensor and copies shape and data so callers can
 // safely reuse their input slices.
 func NewTensor[T TensorData](shape []int64, data []T) (Tensor, error) {
+	return newTensor(shape, data, true)
+}
+
+// TakeTensor constructs a tensor that adopts data without copying it. The
+// caller must not modify data after this function returns. Shape is copied.
+// This is useful when the caller has created a buffer solely for the tensor.
+func TakeTensor[T TensorData](shape []int64, data []T) (Tensor, error) {
+	return newTensor(shape, data, false)
+}
+
+func newTensor[T TensorData](shape []int64, data []T, clone bool) (Tensor, error) {
 	size, err := shapeSize(shape)
 	if err != nil {
 		return Tensor{}, err
@@ -67,9 +78,12 @@ func NewTensor[T TensorData](shape []int64, data []T) (Tensor, error) {
 		return Tensor{}, fmt.Errorf("infergo: tensor shape contains %d elements, data contains %d", size, len(data))
 	}
 
+	if clone {
+		data = slices.Clone(data)
+	}
 	return Tensor{
 		shape:    slices.Clone(shape),
-		data:     slices.Clone(data),
+		data:     data,
 		dataType: dataTypeOf[T](),
 	}, nil
 }

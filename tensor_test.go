@@ -80,6 +80,23 @@ func TestTensorSupportsScalars(t *testing.T) {
 	}
 }
 
+func TestTakeTensorAdoptsData(t *testing.T) {
+	t.Parallel()
+	values := []float32{1, 2}
+	tensor, err := TakeTensor([]int64{2}, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values[0] = 3
+	got, err := tensor.Data[float32]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []float32{3, 2}) {
+		t.Fatalf("Data() = %v", got)
+	}
+}
+
 func TestTensorSupportsZeroDimensions(t *testing.T) {
 	t.Parallel()
 	tensor, err := NewTensor([]int64{2, 0, 3}, []int64{})

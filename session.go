@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"runtime"
 	"slices"
 	"sync"
 
@@ -636,9 +637,12 @@ func runWithContext(
 
 func toORTValue(tensor Tensor) (ort.Value, error) {
 	shape := ort.NewShape(tensor.shape...)
+	if len(tensor.shape) == 0 {
+		return toORTScalar(tensor)
+	}
 	switch data := tensor.data.(type) {
 	case []bool:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []string:
 		value, err := ort.NewStringTensor(shape)
 		if err != nil {
@@ -649,27 +653,89 @@ func toORTValue(tensor Tensor) (ort.Value, error) {
 		}
 		return value, nil
 	case []float32:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []float64:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []int8:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []int16:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []int32:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []int64:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []uint8:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []uint16:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []uint32:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	case []uint64:
-		return ort.NewTensor(shape, data)
+		return newPinnedORTTensor(shape, data)
 	default:
 		return nil, fmt.Errorf("unsupported tensor type %T", tensor.data)
+	}
+}
+
+type pinnedORTValue struct {
+	ort.Value
+	pinner *runtime.Pinner
+}
+
+func (v *pinnedORTValue) Destroy() error {
+	destroyErr := v.Value.Destroy()
+	if v.pinner != nil {
+		v.pinner.Unpin()
+		v.pinner = nil
+	}
+	return destroyErr
+}
+
+func newPinnedORTTensor[T ort.TensorData](shape ort.Shape, data []T) (ort.Value, error) {
+	var pinner *runtime.Pinner
+	if len(data) > 0 {
+		pinner = &runtime.Pinner{}
+		pinner.Pin(&data[0])
+	}
+	value, err := ort.NewTensor(shape, data)
+	if err != nil {
+		if pinner != nil {
+			pinner.Unpin()
+		}
+		return nil, err
+	}
+	runtime.KeepAlive(data)
+	return &pinnedORTValue{Value: value, pinner: pinner}, nil
+}
+
+func toORTScalar(tensor Tensor) (ort.Value, error) {
+	switch data := tensor.data.(type) {
+	case []bool:
+		return ort.NewScalar(data[0])
+	case []string:
+		return nil, errors.New("infergo: string scalar inputs are not supported by the ONNX binding")
+	case []float32:
+		return ort.NewScalar(data[0])
+	case []float64:
+		return ort.NewScalar(data[0])
+	case []int8:
+		return ort.NewScalar(data[0])
+	case []int16:
+		return ort.NewScalar(data[0])
+	case []int32:
+		return ort.NewScalar(data[0])
+	case []int64:
+		return ort.NewScalar(data[0])
+	case []uint8:
+		return ort.NewScalar(data[0])
+	case []uint16:
+		return ort.NewScalar(data[0])
+	case []uint32:
+		return ort.NewScalar(data[0])
+	case []uint64:
+		return ort.NewScalar(data[0])
+	default:
+		return nil, fmt.Errorf("unsupported scalar type %T", tensor.data)
 	}
 }
 
@@ -680,33 +746,33 @@ func fromORTValue(value ort.Value) (Tensor, error) {
 	shape := []int64(value.GetShape())
 	switch value := value.(type) {
 	case *ort.Tensor[bool]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.StringTensor:
 		data, err := value.GetContents()
 		if err != nil {
 			return Tensor{}, err
 		}
-		return NewTensor(shape, data)
+		return TakeTensor(shape, data)
 	case *ort.Tensor[float32]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[float64]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[int8]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[int16]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[int32]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[int64]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[uint8]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[uint16]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[uint32]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	case *ort.Tensor[uint64]:
-		return NewTensor(shape, value.GetData())
+		return TakeTensor(shape, value.GetData())
 	default:
 		return Tensor{}, fmt.Errorf("unsupported ONNX value type %T", value)
 	}
