@@ -84,13 +84,18 @@ func MustTensor[T TensorData](shape []int64, data []T) Tensor {
 	return tensor
 }
 
-// Data returns a copy of tensor's data as T.
-func Data[T TensorData](tensor Tensor) ([]T, error) {
-	data, ok := tensor.data.([]T)
+// Data returns a copy of the tensor elements as T.
+func (t Tensor) Data[T TensorData]() ([]T, error) {
+	data, ok := t.data.([]T)
 	if !ok {
-		return nil, fmt.Errorf("infergo: tensor contains %s, not %s", tensor.dataType, dataTypeOf[T]())
+		return nil, fmt.Errorf("infergo: tensor contains %s, not %s", t.dataType, dataTypeOf[T]())
 	}
 	return slices.Clone(data), nil
+}
+
+// Data returns a copy of tensor's data as T. It is equivalent to Tensor.Data.
+func Data[T TensorData](tensor Tensor) ([]T, error) {
+	return tensor.Data[T]()
 }
 
 // Shape returns a copy of the tensor dimensions.

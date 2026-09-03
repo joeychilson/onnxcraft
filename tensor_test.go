@@ -20,7 +20,7 @@ func TestTensorCopiesInputAndOutput(t *testing.T) {
 	if got := tensor.Shape(); !slices.Equal(got, []int64{1, 3}) {
 		t.Fatalf("Shape() = %v", got)
 	}
-	got, err := Data[float32](tensor)
+	got, err := tensor.Data[float32]()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,12 +28,19 @@ func TestTensorCopiesInputAndOutput(t *testing.T) {
 		t.Fatalf("Data() = %v", got)
 	}
 	got[0] = 100
-	again, err := Data[float32](tensor)
+	again, err := tensor.Data[float32]()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if again[0] != 1 {
 		t.Fatalf("Data() exposed mutable storage: %v", again)
+	}
+	wrapped, err := Data[float32](tensor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(wrapped, []float32{1, 2, 3}) {
+		t.Fatalf("package Data() = %v", wrapped)
 	}
 	if tensor.Type() != DataTypeFloat32 || tensor.Len() != 3 {
 		t.Fatalf("type = %q, len = %d", tensor.Type(), tensor.Len())
@@ -76,7 +83,7 @@ func TestTensorSupportsZeroDimensions(t *testing.T) {
 func TestDataRejectsWrongType(t *testing.T) {
 	t.Parallel()
 	tensor := MustTensor([]int64{1}, []int64{42})
-	if _, err := Data[float32](tensor); err == nil {
+	if _, err := tensor.Data[float32](); err == nil {
 		t.Fatal("Data[float32]() error = nil")
 	}
 }

@@ -270,7 +270,7 @@ func (m *Model) embedBatch(ctx context.Context, texts []string, maxLength int) (
 	if err != nil {
 		return nil, fmt.Errorf("run model: %w", err)
 	}
-	values, err := infergo.Data[float32](outputs[0])
+	values, err := outputs[0].Data[float32]()
 	if err != nil {
 		return nil, fmt.Errorf("read embeddings: %w", err)
 	}

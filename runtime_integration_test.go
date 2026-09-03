@@ -74,7 +74,7 @@ func TestRuntimeIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	values, err := Data[float32](outputs["output_scalars"])
+	values, err := outputs["output_scalars"].Data[float32]()
 	if err != nil {
 		t.Fatal(err)
 	}

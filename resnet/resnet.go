@@ -189,7 +189,7 @@ func (m *Model) ClassifyBatch(
 	if err != nil {
 		return nil, fmt.Errorf("resnet: run model: %w", err)
 	}
-	logits, err := infergo.Data[float32](outputs[0])
+	logits, err := outputs[0].Data[float32]()
 	if err != nil {
 		return nil, fmt.Errorf("resnet: read logits: %w", err)
 	}
