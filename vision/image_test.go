@@ -121,3 +121,34 @@ func TestProcessIntoReusesDestination(t *testing.T) {
 		t.Fatal("ProcessInto() did not reuse destination")
 	}
 }
+
+func FuzzResizeDimensions(f *testing.F) {
+	f.Add(uint16(640), uint16(480), uint16(224), uint16(224))
+	f.Fuzz(func(t *testing.T, sourceWidth, sourceHeight, targetWidth, targetHeight uint16) {
+		width := 1 + int(sourceWidth)%2048
+		height := 1 + int(sourceHeight)%2048
+		options := Options{
+			Width: 1 + int(targetWidth)%512, Height: 1 + int(targetHeight)%512,
+			Mode: ResizeFill, StdDev: [3]float32{1, 1, 1},
+		}
+		resizedWidth, resizedHeight := dimensions(width, height, options)
+		if resizedWidth < options.Width || resizedHeight < options.Height {
+			t.Fatalf("dimensions() = %dx%d, target = %dx%d", resizedWidth, resizedHeight, options.Width, options.Height)
+		}
+	})
+}
+
+func BenchmarkProcessImage(b *testing.B) {
+	source := image.NewRGBA(image.Rect(0, 0, 1920, 1080))
+	options := Options{
+		Width: 224, Height: 224, ShortEdge: 256, LongEdge: math.MaxInt,
+		Mode: ResizeShortestEdge, Interpolation: InterpolationBicubic,
+		StdDev: [3]float32{1, 1, 1}, CenterCrop: true,
+	}
+	destination := make([]float32, 3*224*224)
+	for b.Loop() {
+		if _, err := ProcessInto(source, options, destination); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

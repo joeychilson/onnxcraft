@@ -125,3 +125,34 @@ func TestMustTensorPanics(t *testing.T) {
 	}()
 	_ = MustTensor([]int64{2}, []float32{1})
 }
+
+func FuzzNewTensorShapes(f *testing.F) {
+	f.Add(int64(2), int64(3), uint16(6))
+	f.Add(int64(0), int64(-1), uint16(0))
+	f.Fuzz(func(t *testing.T, first, second int64, length uint16) {
+		data := make([]float32, int(length)%1024)
+		tensor, err := NewTensor([]int64{first, second}, data)
+		if err == nil && tensor.Len() != len(data) {
+			t.Fatalf("Len() = %d, data length = %d", tensor.Len(), len(data))
+		}
+	})
+}
+
+func BenchmarkTensorConstruction(b *testing.B) {
+	shape := []int64{32, 3, 224, 224}
+	data := make([]float32, 32*3*224*224)
+	b.Run("copy", func(b *testing.B) {
+		for b.Loop() {
+			if _, err := NewTensor(shape, data); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("take", func(b *testing.B) {
+		for b.Loop() {
+			if _, err := TakeTensor(shape, data); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 )
 
@@ -112,8 +113,23 @@ func TestRuntimeIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closeErr := memorySession.Close(); closeErr != nil {
-		t.Fatal(closeErr)
+	input := MustTensor([]int64{1, 10}, make([]float32, 10))
+	var runs sync.WaitGroup
+	for range 8 {
+		runs.Go(func() {
+			if _, runErr := memorySession.Run(t.Context(), input); runErr != nil {
+				t.Errorf("concurrent Run(): %v", runErr)
+			}
+		})
+	}
+	runs.Wait()
+	closeErrors := make(chan error, 2)
+	go func() { closeErrors <- memorySession.Close() }()
+	go func() { closeErrors <- memorySession.Close() }()
+	for range 2 {
+		if closeErr := <-closeErrors; closeErr != nil {
+			t.Fatal(closeErr)
+		}
 	}
 	if _, runErr := session.Run(t.Context(), MustTensor([]int64{2, 9}, make([]float32, 18))); runErr == nil {
 		t.Fatal("Run() accepted an invalid fixed dimension")
@@ -133,7 +149,7 @@ func TestRuntimeIntegration(t *testing.T) {
 	if closeErr := runtime.Close(); closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	input := MustTensor([]int64{2, 10}, []float32{
+	input = MustTensor([]int64{2, 10}, []float32{
 		1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
 		11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
 	})

@@ -81,3 +81,51 @@ func TestIntersectionOverUnion(t *testing.T) {
 		t.Fatalf("IntersectionOverUnion(empty) = %v", got)
 	}
 }
+
+func FuzzSoftmax(f *testing.F) {
+	f.Add([]byte{0, 1, 2})
+	f.Add([]byte{255})
+	f.Fuzz(func(t *testing.T, values []byte) {
+		if len(values) == 0 || len(values) > 1024 {
+			return
+		}
+		logits := make([]float32, len(values))
+		for index, value := range values {
+			logits[index] = float32(int(value) - 128)
+		}
+		probabilities, err := Softmax(logits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sum float64
+		for _, probability := range probabilities {
+			if probability < 0 || probability > 1 || math.IsNaN(float64(probability)) {
+				t.Fatalf("invalid probability %v", probability)
+			}
+			sum += float64(probability)
+		}
+		if math.Abs(sum-1) > 1e-5 {
+			t.Fatalf("probability sum = %v", sum)
+		}
+	})
+}
+
+func BenchmarkTopK(b *testing.B) {
+	values := make([]float32, 30_522)
+	for index := range values {
+		values[index] = float32(index%997) / 997
+	}
+	for b.Loop() {
+		_ = TopK(values, 5)
+	}
+}
+
+func BenchmarkSoftmax(b *testing.B) {
+	values := make([]float32, 30_522)
+	destination := make([]float32, len(values))
+	for b.Loop() {
+		if _, err := SoftmaxInto(destination, values); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

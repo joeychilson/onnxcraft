@@ -197,3 +197,41 @@ func TestSpecialTokensRejectCaseFoldedDuplicates(t *testing.T) {
 		t.Fatal("WithSpecialTokens() error = nil")
 	}
 }
+
+func FuzzTokenizerEncode(f *testing.F) {
+	tokenizer, err := NewTokenizer()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add("Hello, 世界 [MASK]", uint16(32))
+	f.Add("\xff\xfe", uint16(2))
+	f.Fuzz(func(t *testing.T, text string, rawLength uint16) {
+		maximum := 2 + int(rawLength)%510
+		encoding, err := tokenizer.Encode(text, maximum)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(encoding.IDs) != len(encoding.Tokens) || len(encoding.IDs) != len(encoding.AttentionMask) {
+			t.Fatalf("inconsistent encoding lengths: %+v", encoding)
+		}
+		if len(encoding.IDs) > maximum {
+			t.Fatalf("encoding length = %d, maximum = %d", len(encoding.IDs), maximum)
+		}
+	})
+}
+
+func BenchmarkTokenizerEncodeBatch(b *testing.B) {
+	tokenizer, err := NewTokenizer()
+	if err != nil {
+		b.Fatal(err)
+	}
+	texts := make([]string, 32)
+	for index := range texts {
+		texts[index] = "A fast and reliable inference library for production workloads."
+	}
+	for b.Loop() {
+		if _, err := tokenizer.EncodeBatch(texts, 256); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

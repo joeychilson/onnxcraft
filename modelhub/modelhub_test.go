@@ -351,3 +351,20 @@ func response(contents []byte) *http.Response {
 		Header:        make(http.Header),
 	}
 }
+
+func FuzzSafePathParts(f *testing.F) {
+	f.Add("owner/model")
+	f.Add("../model")
+	f.Add("owner\\model")
+	f.Fuzz(func(t *testing.T, path string) {
+		parts, err := safePathParts(path)
+		if err != nil {
+			return
+		}
+		for _, part := range parts {
+			if part == "" || part == "." || part == ".." || strings.ContainsAny(part, `/\\`) {
+				t.Fatalf("unsafe accepted path part %q from %q", part, path)
+			}
+		}
+	})
+}
