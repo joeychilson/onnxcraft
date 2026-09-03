@@ -1,44 +1,32 @@
-# infergo
+# Infergo
 
 [![CI](https://github.com/joeychilson/infergo/actions/workflows/ci.yml/badge.svg)](https://github.com/joeychilson/infergo/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/joeychilson/infergo.svg)](https://pkg.go.dev/github.com/joeychilson/infergo)
 [![Release](https://img.shields.io/github/v/release/joeychilson/infergo)](https://github.com/joeychilson/infergo/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Fast, typed ONNX inference for Go with managed native runtimes, verified model
-artifacts, and production-oriented model pipelines.
+Infergo is a Go library for running ONNX models without manually managing the
+native runtime. It provides typed tensors and sessions, verified model
+downloads, and ready-to-use pipelines for common language and vision tasks.
 
-Requires Go 1.27 or later and a C toolchain for cgo.
+Use the low-level API with any supported ONNX tensor model, or start with the
+built-in BERT, sentence-embedding, ResNet, and YOLOS packages.
 
-## Installation
+## Requirements
 
-```text
+- Go 1.27 or later
+- A C toolchain for cgo
+
+## Install
+
+```sh
 go get github.com/joeychilson/infergo
 ```
 
-## Packages
-
-- `infergo` — verified ONNX Runtime installation, lifecycle-safe sessions,
-  model inspection, named or positional execution, metadata, typed tensors,
-  graph optimization, context cancellation, and CPU/Core ML/CUDA/TensorRT/
-  OpenVINO/DirectML execution.
-- `bert` — configurable WordPiece tokenization, dynamic batches,
-  masked-language prediction, and softmax/sigmoid sequence classification.
-- `embedding` — batched sentence embeddings, attention-aware mean or CLS
-  pooling, L2 normalization, and cosine similarity.
-- `modelhub` — pinned model catalog plus atomic, SHA-256-verified downloads,
-  caching, size limits, bundles, and offline mode.
-- `resnet` — end-to-end, batched ImageNet image classification.
-- `yolos` — end-to-end COCO object detection with YOLOS transformer models.
-- `vision` — resize, crop, RGB normalization, and NCHW tensor conversion.
-- `postprocess` — softmax classification and class-aware non-max suppression.
-- `labels` — immutable access to the standard ImageNet-1K and COCO labels.
-
 ## Quick start
 
-Create normalized MiniLM sentence embeddings and compare them. The first run
-downloads both the pinned model and matching ONNX Runtime, verifies their
-SHA-256 digests, and reuses them from the user cache afterward.
+This example downloads a pinned MiniLM model, creates sentence embeddings, and
+compares them. Models and ONNX Runtime are cached after the first download.
 
 ```go
 package main
@@ -55,6 +43,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+
 	hub, err := modelhub.New()
 	if err != nil {
 		log.Fatal(err)
@@ -83,6 +72,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	similarity, err := embedding.CosineSimilarity(vectors[0], vectors[1])
 	if err != nil {
 		log.Fatal(err)
@@ -91,143 +81,79 @@ func main() {
 }
 ```
 
-Runnable BERT, embedding, ResNet, and YOLOS programs are in
-[`examples`](examples). They download the matching verified model when no
-model path is supplied.
+More runnable examples are available in [`examples`](examples).
 
-## Verified model catalog
+## Packages
 
-The catalog pins every artifact to an immutable repository commit, exact byte
-count, and SHA-256 digest. It is deliberately small; any HTTP or Hugging Face
-artifact can use the same `modelhub.Artifact` and `modelhub.HuggingFace` APIs.
+| Package | Purpose |
+| --- | --- |
+| `infergo` | Runtime management, model inspection, typed tensors, and ONNX sessions |
+| `modelhub` | Verified model downloads, caching, bundles, and offline mode |
+| `bert` | WordPiece tokenization, fill-mask inference, and text classification |
+| `embedding` | Batched sentence embeddings, pooling, normalization, and similarity |
+| `resnet` | Batched ImageNet image classification |
+| `yolos` | COCO object detection with YOLOS models |
+| `vision` | Image resizing, normalization, and NCHW conversion |
+| `postprocess` | Classification and object-detection postprocessing |
+| `labels` | ImageNet-1K and COCO labels |
 
-| Function | Task | Size | Compatible API |
-| --- | --- | ---: | --- |
-| `modelhub.BERTBaseUncased()` | fill mask | 110.8 MB | `bert.New` |
-| `modelhub.AllMiniLML6V2()` | sentence embedding | 90.4 MB | `embedding.New` |
-| `modelhub.ResNet50()` | ImageNet classification | 102.2 MB | `resnet.New` |
-| `modelhub.YOLOSSmall()` | COCO object detection | 123.0 MB | `yolos.New` |
+## Included models
 
-Pass `modelhub.WithOffline(true)` to guarantee that a run never accesses the
-network. `FetchBundle` keeps an ONNX graph and its external tensor-data files
-in one immutable directory; `FetchAll` handles independent batch downloads.
-Model weights remain under their upstream licenses and are not copied into
-this module.
+The small built-in catalog pins each model to an immutable revision, expected
+size, and SHA-256 digest. Custom HTTP and Hugging Face artifacts use the same
+`modelhub` API.
 
-## Language models
+| Model | Task | API |
+| --- | --- | --- |
+| `modelhub.BERTBaseUncased()` | Fill mask | `bert.New` |
+| `modelhub.AllMiniLML6V2()` | Sentence embeddings | `embedding.New` |
+| `modelhub.ResNet50()` | Image classification | `resnet.New` |
+| `modelhub.YOLOSSmall()` | Object detection | `yolos.New` |
 
-BERT model constructors inspect graph inputs and automatically supply a
-zero-valued `token_type_ids` tensor when an export requires it. DistilBERT
-two-input exports work without configuration. Custom graph names remain
-available through `WithTensorNames` and `WithTokenTypeIDs`.
+Use `modelhub.WithOffline(true)` when network access must be disabled. Model
+weights remain subject to their upstream licenses and are not included in this
+module.
 
-`bert.NewClassifier` supports batched single-label softmax, multi-label
-sigmoid, and raw-score classification. Tokenizers can load any line-delimited
-WordPiece vocabulary with `bert.NewTokenizerFromFile`; lowercasing, accent
-stripping, and all special tokens are configurable for cased and multilingual
-models.
+## ONNX Runtime
 
-## Native runtime
+`infergo.Open` automatically downloads and verifies the CPU build of ONNX
+Runtime 1.29.0 on:
 
-Infergo vNext uses ONNX Runtime 1.29.0 and verifies every automatic download
-against the digest published with the official release. Automatic installation
-supports:
+- macOS ARM64
+- Linux AMD64 and ARM64
+- Windows AMD64 and ARM64
 
-- macOS on ARM64;
-- Linux on AMD64 or ARM64; and
-- Windows on AMD64 or ARM64.
+Set `ONNXRUNTIME_SHARED_LIBRARY_PATH` or use `infergo.WithLibraryPath` to load a
+system or custom runtime. Core ML is available on supported Apple builds;
+CUDA, TensorRT, OpenVINO, DirectML, and other providers require a compatible
+custom runtime and the corresponding session option.
 
-For a system installation, a custom build, or another platform, set
-`ONNXRUNTIME_SHARED_LIBRARY_PATH` or pass
-`infergo.WithLibraryPath("/path/to/library")` to `infergo.Open`.
+The native environment is shared safely across runtimes and sessions. Sessions
+remain usable until closed, even if their parent runtime has already closed.
 
-Automatic downloads are CPU builds. Core ML can be enabled on supported Apple
-builds with `infergo.WithCoreML(nil)`. CUDA, TensorRT, OpenVINO, and DirectML
-require an appropriate native runtime supplied through
-`infergo.WithLibraryPath`, followed by the matching session option. The generic
-`infergo.WithExecutionProvider` supports other providers such as QNN and
-XNNPACK when compiled into that runtime. Provider options compose in priority
-order and work through every high-level model's `WithSessionOptions` option.
+## Low-level API
 
-The native ONNX Runtime environment is process-wide. Multiple runtimes and
-sessions share it safely through reference counting, and active sessions keep
-it alive even if their parent runtime is closed.
+Use `Runtime.Inspect` to discover model inputs and outputs, `Runtime.Load` to
+create a session from that schema, and `Session.Run` or `Session.RunNamed` for
+inference. Sessions support concurrent calls, context cancellation, graph
+optimization, metadata, and configurable execution providers.
 
-## Low-level sessions
-
-Model-specific packages are the easiest entry point. Arbitrary ONNX tensor
-models can be inspected, loaded without hard-coded graph names, and run by
-name:
-
-```go
-info, err := runtime.Inspect("model.onnx")
-if err != nil {
-	log.Fatal(err)
-}
-fmt.Println(info.Inputs, info.Outputs)
-
-session, err := runtime.Load("model.onnx")
-if err != nil {
-	log.Fatal(err)
-}
-defer session.Close()
-
-input := infergo.MustTensor([]int64{1, 2}, []float32{1, 2})
-outputs, err := session.RunNamed(ctx, map[string]infergo.Tensor{"input": input})
-if err != nil {
-	log.Fatal(err)
-}
-values, err := infergo.Data[float32](outputs["output"])
-if err != nil {
-	log.Fatal(err)
-}
-```
-
-`Session.Metadata` exposes producer, graph, domain, description, version, and
-custom metadata. `NewSession` remains available for positional execution and
-for selecting only the outputs a large model should calculate. `Run` and
-`RunNamed` may be called concurrently; returned tensors own independent Go
-memory.
-
-Model inspection reports tensors, sequences, maps, optional values, sparse
-tensors, dynamic dimensions, and modern ONNX element types. Dense execution
-currently supports booleans, strings, and the standard 8/16/32/64-bit integer
-and 32/64-bit floating-point tensor types.
-
-## Migration from the original API
-
-This rebuild intentionally removes the old `pkg/*` and `models/*` layout.
-Replace:
-
-- `pkg/onnx.New` with `infergo.Open`;
-- `models/bert` plus manual tokenization with `bert.FillMask`;
-- `models/resnet` plus manual preprocessing with `resnet.Classify`; and
-- `models/yolo` with `yolos.Detect`.
-
-Prediction confidence is now consistently named `Score`. The new API validates
-tensor shapes and options, honors context cancellation, applies
-`MaxDetections`, avoids mutating caller data, and keeps native resources alive
-for their complete lifetime. This rebuild is a breaking major-version change;
-pin the original module version while migrating existing applications.
+Dense execution supports booleans, strings, standard integer types, `float32`,
+and `float64` tensors.
 
 ## Development
 
-```text
+```sh
 golangci-lint run ./...
-go test -shuffle=on ./...
 go test -race -shuffle=on ./...
 go build ./...
 ```
 
-Set `INFERGO_INTEGRATION=1` to run the native ONNX Runtime smoke test. It
-downloads the official runtime into a temporary cache, inspects and loads a
-real ONNX graph, reads metadata, executes it by name, and verifies the result.
+Run the native ONNX Runtime integration test with:
 
-## Release
-
-Push a semantic version tag in the form `vMAJOR.MINOR.PATCH`, optionally with a
-prerelease suffix, to create a GitHub Release with generated notes. The release
-publishes the Go module source and does not include binary artifacts.
+```sh
+INFERGO_INTEGRATION=1 go test ./...
+```
 
 ## License
 
