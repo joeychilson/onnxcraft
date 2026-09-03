@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a focused API, provider, model, or performance improvement.
+title: "feat: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the use case and why the current API does not solve it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API or behavior
+      description: Include a Go example when proposing public API.
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs
+      description: Explain workarounds and the ownership, compatibility, or performance implications.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link relevant ONNX Runtime documentation and include benchmarks or profiles for performance work.
+
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Compatibility
+      options:
+        - label: I considered backward compatibility and cross-platform behavior.
+          required: true
+        - label: I searched existing issues and proposals.
+          required: true
