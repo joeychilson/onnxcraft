@@ -25,6 +25,8 @@ import (
 const (
 	defaultMaximumSize = int64(10 << 30)
 	defaultConcurrency = 4
+	defaultRetries     = 2
+	initialRetryDelay  = 100 * time.Millisecond
 )
 
 // ErrNotCached is returned in offline mode when an artifact is unavailable.
@@ -32,6 +34,18 @@ var ErrNotCached = errors.New("modelhub: artifact is not cached")
 
 // ErrCorrupt is returned when an offline cached artifact fails verification.
 var ErrCorrupt = errors.New("modelhub: cached artifact is corrupt")
+
+// HTTPError reports a non-successful artifact response.
+type HTTPError struct {
+	URL        string
+	Status     string
+	StatusCode int
+}
+
+// Error implements error.
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("modelhub: download %s: unexpected HTTP status %s", e.URL, e.Status)
+}
 
 // Artifact identifies one immutable model file.
 type Artifact struct {
@@ -63,6 +77,7 @@ type clientConfig struct {
 	offline     bool
 	maxSize     int64
 	concurrency int
+	retries     int
 }
 
 // Client downloads verified model artifacts into a local cache.
@@ -72,6 +87,7 @@ type Client struct {
 	offline     bool
 	maxSize     int64
 	concurrency int
+	retries     int
 }
 
 var artifactLocks = struct {
@@ -136,12 +152,25 @@ func WithConcurrency(count int) Option {
 	}
 }
 
+// WithRetries sets the number of retries after a transient download failure.
+// The default is two retries, for at most three requests.
+func WithRetries(count int) Option {
+	return func(config *clientConfig) error {
+		if count < 0 || count > 10 {
+			return errors.New("modelhub: retries must be between zero and ten")
+		}
+		config.retries = count
+		return nil
+	}
+}
+
 // New creates a model artifact client.
 func New(options ...Option) (*Client, error) {
 	config := clientConfig{
 		client:      &http.Client{Timeout: 30 * time.Minute},
 		maxSize:     defaultMaximumSize,
 		concurrency: defaultConcurrency,
+		retries:     defaultRetries,
 	}
 	for _, option := range options {
 		if option == nil {
@@ -168,6 +197,7 @@ func New(options ...Option) (*Client, error) {
 		offline:     config.offline,
 		maxSize:     config.maxSize,
 		concurrency: config.concurrency,
+		retries:     config.retries,
 	}, nil
 }
 
@@ -356,19 +386,63 @@ func (c *Client) FetchBundle(ctx context.Context, bundle Bundle) (BundlePaths, e
 	return result, nil
 }
 
-func (c *Client) download(ctx context.Context, artifact Artifact, digest, target string) (resultErr error) {
+func (c *Client) download(ctx context.Context, artifact Artifact, digest, target string) error {
+	for attempt := 0; ; attempt++ {
+		err := c.downloadOnce(ctx, artifact, digest, target)
+		if err == nil {
+			return nil
+		}
+		var retryable *retryableDownloadError
+		if attempt >= c.retries || !errors.As(err, &retryable) {
+			return err
+		}
+		delay := retryable.delay
+		if delay <= 0 {
+			delay = initialRetryDelay << attempt
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(ctx.Err(), err)
+		case <-timer.C:
+		}
+	}
+}
+
+type retryableDownloadError struct {
+	err   error
+	delay time.Duration
+}
+
+func (e *retryableDownloadError) Error() string {
+	return e.err.Error()
+}
+
+func (e *retryableDownloadError) Unwrap() error {
+	return e.err
+}
+
+func (c *Client) downloadOnce(ctx context.Context, artifact Artifact, digest, target string) (resultErr error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
 	if err != nil {
 		return fmt.Errorf("modelhub: create request: %w", err)
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("modelhub: download %s: %w", artifact.Name, err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return &retryableDownloadError{err: fmt.Errorf("modelhub: download %s: %w", artifact.Name, err)}
 	}
 	defer func() { resultErr = errors.Join(resultErr, response.Body.Close()) }()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-		return fmt.Errorf("modelhub: download %s: unexpected HTTP status %s", artifact.Name, response.Status)
+		httpErr := &HTTPError{URL: artifact.URL, Status: response.Status, StatusCode: response.StatusCode}
+		if retryableStatus(response.StatusCode) {
+			return &retryableDownloadError{err: httpErr, delay: retryAfter(response.Header.Get("Retry-After"), time.Now())}
+		}
+		return httpErr
 	}
 	if response.ContentLength > c.maxSize {
 		return fmt.Errorf("modelhub: download %s exceeds the %d-byte limit", artifact.Name, c.maxSize)
@@ -413,6 +487,31 @@ func (c *Client) download(ctx context.Context, artifact Artifact, digest, target
 		return fmt.Errorf("modelhub: cache artifact: %w", err)
 	}
 	return nil
+}
+
+func retryableStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryAfter(value string, now time.Time) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if seconds, err := time.ParseDuration(value + "s"); err == nil {
+		return max(0, seconds)
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	return max(0, when.Sub(now))
 }
 
 func validateArtifact(artifact Artifact) (string, error) {

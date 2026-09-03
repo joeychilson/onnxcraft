@@ -144,6 +144,66 @@ func TestMaximumSize(t *testing.T) {
 	if _, err := New(WithConcurrency(0)); err == nil {
 		t.Fatal("New(WithConcurrency(0)) error = nil")
 	}
+	if _, err := New(WithRetries(-1)); err == nil {
+		t.Fatal("New(WithRetries(-1)) error = nil")
+	}
+}
+
+func TestFetchRetriesTransientResponses(t *testing.T) {
+	t.Parallel()
+	contents := []byte("model")
+	digest := sha256.Sum256(contents)
+	var requests atomic.Int32
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		if requests.Add(1) == 1 {
+			response := response(nil)
+			response.StatusCode = http.StatusServiceUnavailable
+			response.Status = "503 Service Unavailable"
+			return response, nil
+		}
+		return response(contents), nil
+	})}
+	client, err := New(WithCacheDir(t.TempDir()), WithHTTPClient(httpClient), WithRetries(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Fetch(t.Context(), Artifact{
+		Name: "model.onnx", URL: "https://example.com/model.onnx",
+		SHA256: hex.EncodeToString(digest[:]), Size: int64(len(contents)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d, want 2", requests.Load())
+	}
+}
+
+func TestFetchDoesNotRetryPermanentResponses(t *testing.T) {
+	t.Parallel()
+	digest := sha256.Sum256([]byte("model"))
+	var requests atomic.Int32
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		response := response(nil)
+		response.StatusCode = http.StatusNotFound
+		response.Status = "404 Not Found"
+		return response, nil
+	})}
+	client, err := New(WithCacheDir(t.TempDir()), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Fetch(t.Context(), Artifact{
+		Name: "model.onnx", URL: "https://example.com/model.onnx", SHA256: hex.EncodeToString(digest[:]),
+	})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("Fetch() error = %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
 }
 
 func TestFetchAllUsesBoundedConcurrency(t *testing.T) {
