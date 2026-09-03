@@ -23,6 +23,16 @@ const (
 	OptimizationAll
 )
 
+// ExecutionMode controls whether independent graph nodes may execute in
+// parallel. Sequential execution is the default.
+type ExecutionMode int
+
+// Supported graph execution modes.
+const (
+	ExecutionSequential ExecutionMode = iota
+	ExecutionParallel
+)
+
 // SessionOption configures a Session.
 type SessionOption func(*sessionConfig) error
 
@@ -30,6 +40,9 @@ type sessionConfig struct {
 	intraOpThreads int
 	interOpThreads int
 	optimization   OptimizationLevel
+	executionMode  ExecutionMode
+	executionSet   bool
+	directML       bool
 	providers      []func(*ort.SessionOptions) error
 }
 
@@ -38,10 +51,14 @@ type sessionConfig struct {
 type Session struct {
 	mu          sync.RWMutex
 	active      sync.WaitGroup
+	runMu       sync.Mutex
 	raw         *ort.DynamicAdvancedSession
 	release     func() error
 	inputNames  []string
 	outputNames []string
+	serialize   bool
+	closeDone   chan struct{}
+	closeErr    error
 }
 
 // WithIntraOpThreads sets the number of threads used within an operator.
@@ -62,6 +79,20 @@ func WithInterOpThreads(count int) SessionOption {
 			return errors.New("infergo: inter-op thread count must be positive")
 		}
 		config.interOpThreads = count
+		return nil
+	}
+}
+
+// WithExecutionMode sets graph execution to sequential or parallel. Setting
+// inter-op threads implicitly selects parallel execution unless this option is
+// used explicitly.
+func WithExecutionMode(mode ExecutionMode) SessionOption {
+	return func(config *sessionConfig) error {
+		if mode < ExecutionSequential || mode > ExecutionParallel {
+			return fmt.Errorf("infergo: invalid execution mode %d", mode)
+		}
+		config.executionMode = mode
+		config.executionSet = true
 		return nil
 	}
 }
@@ -184,6 +215,7 @@ func WithDirectML(deviceID int) SessionOption {
 		if deviceID < 0 {
 			return errors.New("infergo: DirectML device ID cannot be negative")
 		}
+		config.directML = true
 		config.providers = append(config.providers, func(options *ort.SessionOptions) error {
 			if err := options.AppendExecutionProviderDirectML(deviceID); err != nil {
 				return fmt.Errorf("infergo: enable DirectML execution provider: %w", err)
@@ -272,6 +304,10 @@ func (s *Session) Run(ctx context.Context, inputs ...Tensor) (result []Tensor, r
 	outputNames := s.outputNames
 	s.mu.RUnlock()
 	defer s.active.Done()
+	if s.serialize {
+		s.runMu.Lock()
+		defer s.runMu.Unlock()
+	}
 
 	if len(inputs) != len(inputNames) {
 		return nil, fmt.Errorf("infergo: got %d input tensors, want %d", len(inputs), len(inputNames))
@@ -413,20 +449,34 @@ func (s *Session) Close() error {
 	}
 	s.mu.Lock()
 	if s.raw == nil {
+		done := s.closeDone
+		closeErr := s.closeErr
 		s.mu.Unlock()
-		return nil
+		if done == nil {
+			return closeErr
+		}
+		<-done
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.closeErr
 	}
 	raw := s.raw
 	s.raw = nil
 	release := s.release
 	s.release = nil
+	done := make(chan struct{})
+	s.closeDone = done
 	s.mu.Unlock()
 	s.active.Wait()
-	destroyErr := raw.Destroy()
-	if release == nil {
-		return destroyErr
+	closeErr := raw.Destroy()
+	if release != nil {
+		closeErr = errors.Join(closeErr, release())
 	}
-	return errors.Join(destroyErr, release())
+	s.mu.Lock()
+	s.closeErr = closeErr
+	close(done)
+	s.mu.Unlock()
+	return closeErr
 }
 
 func newSession(modelPath string, inputNames, outputNames []string, config sessionConfig) (*Session, error) {
@@ -447,6 +497,7 @@ func newSession(modelPath string, inputNames, outputNames []string, config sessi
 		raw:         raw,
 		inputNames:  slices.Clone(inputNames),
 		outputNames: slices.Clone(outputNames),
+		serialize:   config.directML,
 	}, nil
 }
 
@@ -459,6 +510,18 @@ func resolveSessionConfig(options []SessionOption) (sessionConfig, error) {
 		if err := option(&config); err != nil {
 			return sessionConfig{}, err
 		}
+	}
+	if config.interOpThreads > 0 && !config.executionSet {
+		config.executionMode = ExecutionParallel
+	}
+	if config.interOpThreads > 0 && config.executionMode != ExecutionParallel {
+		return sessionConfig{}, errors.New("infergo: inter-op threads require parallel execution")
+	}
+	if config.directML {
+		if config.executionMode == ExecutionParallel {
+			return sessionConfig{}, errors.New("infergo: DirectML requires sequential execution")
+		}
+		config.executionMode = ExecutionSequential
 	}
 	return config, nil
 }
@@ -485,6 +548,18 @@ func newORTSessionOptions(config sessionConfig) (*ort.SessionOptions, error) {
 	if config.interOpThreads > 0 {
 		if optionErr := options.SetInterOpNumThreads(config.interOpThreads); optionErr != nil {
 			return nil, errors.Join(fmt.Errorf("infergo: set inter-op threads: %w", optionErr), options.Destroy())
+		}
+	}
+	executionMode := ort.ExecutionMode(ort.ExecutionModeSequential)
+	if config.executionMode == ExecutionParallel {
+		executionMode = ort.ExecutionMode(ort.ExecutionModeParallel)
+	}
+	if optionErr := options.SetExecutionMode(executionMode); optionErr != nil {
+		return nil, errors.Join(fmt.Errorf("infergo: set execution mode: %w", optionErr), options.Destroy())
+	}
+	if config.directML {
+		if optionErr := options.SetMemPattern(false); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: disable memory patterns for DirectML: %w", optionErr), options.Destroy())
 		}
 	}
 	for _, configureProvider := range config.providers {
@@ -540,16 +615,23 @@ func runWithContext(
 		return nil
 	}
 
-	stop := context.AfterFunc(ctx, func() { _ = options.Terminate() })
-	defer stop()
+	callbackDone := make(chan struct{})
+	var terminateErr error
+	stop := context.AfterFunc(ctx, func() {
+		terminateErr = options.Terminate()
+		close(callbackDone)
+	})
 	runErr := session.RunWithOptions(inputs, outputs, options)
+	if !stop() {
+		<-callbackDone
+	}
 	if err := ctx.Err(); err != nil {
-		return errors.Join(err, runErr)
+		return errors.Join(err, runErr, terminateErr)
 	}
 	if runErr != nil {
-		return fmt.Errorf("infergo: run model: %w", runErr)
+		return errors.Join(fmt.Errorf("infergo: run model: %w", runErr), terminateErr)
 	}
-	return nil
+	return terminateErr
 }
 
 func toORTValue(tensor Tensor) (ort.Value, error) {

@@ -54,8 +54,8 @@ func TestNewTensorRejectsInvalidShapes(t *testing.T) {
 		shape []int64
 		data  []float32
 	}{
-		{name: "empty", shape: nil},
 		{name: "negative", shape: []int64{-1}},
+		{name: "negative after zero", shape: []int64{0, -1}},
 		{name: "overflow", shape: []int64{math.MaxInt64, 2}},
 		{name: "mismatch", shape: []int64{2}, data: []float32{1}},
 	}
@@ -66,6 +66,17 @@ func TestNewTensorRejectsInvalidShapes(t *testing.T) {
 				t.Fatal("NewTensor() error = nil")
 			}
 		})
+	}
+}
+
+func TestTensorSupportsScalars(t *testing.T) {
+	t.Parallel()
+	tensor, err := NewTensor([]int64{}, []float32{42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tensor.Len() != 1 {
+		t.Fatalf("Len() = %d, want 1", tensor.Len())
 	}
 }
 

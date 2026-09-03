@@ -26,6 +26,9 @@ func TestSessionOptions(t *testing.T) {
 	if err := WithOptimization(OptimizationExtended)(&config); err != nil {
 		t.Fatal(err)
 	}
+	if err := WithExecutionMode(ExecutionParallel)(&config); err != nil {
+		t.Fatal(err)
+	}
 	if err := WithCoreML(map[string]string{"ModelFormat": "MLProgram"})(&config); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +47,7 @@ func TestSessionOptions(t *testing.T) {
 	if err := WithDirectML(0)(&config); err != nil {
 		t.Fatal(err)
 	}
-	if config.intraOpThreads != 4 || config.interOpThreads != 2 || config.optimization != OptimizationExtended || len(config.providers) != 6 {
+	if config.intraOpThreads != 4 || config.interOpThreads != 2 || config.optimization != OptimizationExtended || config.executionMode != ExecutionParallel || !config.directML || len(config.providers) != 6 {
 		t.Fatalf("config = %+v", config)
 	}
 	if err := WithIntraOpThreads(0)(&config); err == nil {
@@ -56,11 +59,37 @@ func TestSessionOptions(t *testing.T) {
 	if err := WithOptimization(OptimizationLevel(99))(&config); err == nil {
 		t.Fatal("WithOptimization(99) error = nil")
 	}
+	if err := WithExecutionMode(ExecutionMode(99))(&config); err == nil {
+		t.Fatal("WithExecutionMode(99) error = nil")
+	}
 	if err := WithDirectML(-1)(&config); err == nil {
 		t.Fatal("WithDirectML(-1) error = nil")
 	}
 	if err := WithExecutionProvider("", nil)(&config); err == nil {
 		t.Fatal("WithExecutionProvider() error = nil")
+	}
+}
+
+func TestResolveSessionConfig(t *testing.T) {
+	t.Parallel()
+	config, err := resolveSessionConfig([]SessionOption{WithInterOpThreads(2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.executionMode != ExecutionParallel {
+		t.Fatalf("execution mode = %d, want parallel", config.executionMode)
+	}
+	if _, err := resolveSessionConfig([]SessionOption{
+		WithInterOpThreads(2),
+		WithExecutionMode(ExecutionSequential),
+	}); err == nil {
+		t.Fatal("sequential execution with inter-op threads error = nil")
+	}
+	if _, err := resolveSessionConfig([]SessionOption{
+		WithDirectML(0),
+		WithExecutionMode(ExecutionParallel),
+	}); err == nil {
+		t.Fatal("parallel DirectML error = nil")
 	}
 }
 

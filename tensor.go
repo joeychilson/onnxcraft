@@ -118,16 +118,17 @@ func (t Tensor) Len() int {
 }
 
 func shapeSize(shape []int64) (int64, error) {
-	if len(shape) == 0 {
-		return 0, errors.New("infergo: tensor shape must contain at least one dimension")
-	}
+	hasZeroDimension := false
 	for index, dimension := range shape {
 		if dimension < 0 {
 			return 0, fmt.Errorf("infergo: tensor dimension %d is negative", index)
 		}
 		if dimension == 0 {
-			return 0, nil
+			hasZeroDimension = true
 		}
+	}
+	if hasZeroDimension {
+		return 0, nil
 	}
 
 	size := int64(1)
