@@ -18,12 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: go.mod
+          go-version: "1.27.1"
           cache: true
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
           version: v2.13
 
@@ -32,10 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: go.mod
+          go-version: "1.27.1"
           cache: true
       - name: Check modules
         run: |
@@ -45,35 +45,78 @@ jobs:
         run: go test -race -shuffle=on ./...
       - name: Build
         run: go build ./...
+      - name: Compile benchmarks
+        run: go test -run '^$' -bench=. -benchtime=1x ./...
 
   integration:
-    name: Integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    name: Integration (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            command: go test -race -count=1 -shuffle=on ./...
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            command: go test -race -count=1 -shuffle=on ./...
+          - platform: darwin-arm64
+            runner: macos-15
+            command: go test -race -count=1 -shuffle=on ./...
+          - platform: windows-amd64
+            runner: windows-2025
+            command: go test -race -count=1 -shuffle=on ./...
+          - platform: windows-arm64
+            runner: windows-11-arm
+            command: go test -count=1 -shuffle=on ./...
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     env:
       INFERGO_CACHE_DIR: ${{ github.workspace }}/.cache/infergo
+      GOEXPERIMENT: cgocheck2
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version-file: go.mod
+          go-version: "1.27.1"
           cache: true
       - name: Cache ONNX Runtime
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.INFERGO_CACHE_DIR }}
           key: onnxruntime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime.go', 'runtime_assets.go') }}
       - name: Test with native runtime
         env:
           INFERGO_INTEGRATION: "1"
-        run: go test -race -count=1 -shuffle=on ./...
+        run: ${{ matrix.command }}
+
+  address-sanitizer:
+    name: Address sanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      INFERGO_CACHE_DIR: ${{ github.workspace }}/.cache/infergo
+      INFERGO_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.27.1"
+          cache: true
+      - name: Cache ONNX Runtime
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ env.INFERGO_CACHE_DIR }}
+          key: onnxruntime-asan-${{ hashFiles('runtime.go', 'runtime_assets.go') }}
+      - name: Test native boundary
+        run: go test -asan -count=1 -shuffle=on ./...
 
   vulnerability:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: golang/govulncheck-action@v1
+      - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
         with:
-          go-version-file: go.mod
+          go-version-input: "1.27.1"
           go-package: ./...
