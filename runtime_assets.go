@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/joeychilson/infergo/internal/atomicfile"
+	"github.com/joeychilson/infergo/internal/filelock"
 )
 
 const releaseBaseURL = "https://github.com/microsoft/onnxruntime/releases/download/v" + RuntimeVersion
@@ -81,11 +82,27 @@ func ensureRuntime(ctx context.Context, config runtimeConfig) (string, error) {
 	runtimeDir := filepath.Join(config.cacheDir, "onnxruntime", RuntimeVersion, currentOS+"-"+currentArch)
 	libraryPath := filepath.Join(runtimeDir, artifact.libraryName)
 	markerPath := libraryPath + ".verified"
-	if verifiedRuntimeExists(libraryPath, markerPath, artifact.digest) {
+	valid, err := verifiedRuntimeExists(libraryPath, markerPath)
+	if err != nil {
+		return "", err
+	}
+	if valid {
 		return libraryPath, nil
 	}
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return "", fmt.Errorf("infergo: create runtime cache: %w", err)
+	if mkdirErr := os.MkdirAll(runtimeDir, 0o755); mkdirErr != nil {
+		return "", fmt.Errorf("infergo: create runtime cache: %w", mkdirErr)
+	}
+	installLock, err := filelock.Acquire(ctx, libraryPath+".lock")
+	if err != nil {
+		return "", fmt.Errorf("infergo: lock runtime cache: %w", err)
+	}
+	defer func() { _ = installLock.Close() }()
+	valid, err = verifiedRuntimeExists(libraryPath, markerPath)
+	if err != nil {
+		return "", err
+	}
+	if valid {
+		return libraryPath, nil
 	}
 
 	archiveFile, err := downloadArtifact(
@@ -108,32 +125,78 @@ func ensureRuntime(ctx context.Context, config runtimeConfig) (string, error) {
 	temporaryPath := temporaryLibrary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
 
-	if err := extractLibrary(archiveFile, artifact.archiveName, artifact.libraryName, temporaryLibrary); err != nil {
+	if extractErr := extractLibrary(archiveFile, artifact.archiveName, artifact.libraryName, temporaryLibrary); extractErr != nil {
 		_ = temporaryLibrary.Close()
-		return "", err
+		return "", extractErr
 	}
-	if err := temporaryLibrary.Close(); err != nil {
-		return "", fmt.Errorf("infergo: close temporary runtime library: %w", err)
+	if syncErr := temporaryLibrary.Sync(); syncErr != nil {
+		_ = temporaryLibrary.Close()
+		return "", fmt.Errorf("infergo: sync runtime library: %w", syncErr)
 	}
-	if err := os.Chmod(temporaryPath, 0o755); err != nil {
-		return "", fmt.Errorf("infergo: make runtime library executable: %w", err)
+	if closeErr := temporaryLibrary.Close(); closeErr != nil {
+		return "", fmt.Errorf("infergo: close temporary runtime library: %w", closeErr)
+	}
+	if chmodErr := os.Chmod(temporaryPath, 0o755); chmodErr != nil {
+		return "", fmt.Errorf("infergo: make runtime library executable: %w", chmodErr)
+	}
+	libraryDigest, err := fileDigest(temporaryPath)
+	if err != nil {
+		return "", fmt.Errorf("infergo: hash runtime library: %w", err)
 	}
 	if err := atomicfile.Replace(temporaryPath, libraryPath); err != nil {
 		return "", fmt.Errorf("infergo: install runtime library: %w", err)
 	}
-	if err := writeMarker(markerPath, artifact.digest); err != nil {
+	if err := writeMarker(markerPath, libraryDigest); err != nil {
 		return "", err
 	}
 	return libraryPath, nil
 }
 
-func verifiedRuntimeExists(libraryPath, markerPath, digest string) bool {
+func verifiedRuntimeExists(libraryPath, markerPath string) (bool, error) {
 	info, err := os.Stat(libraryPath)
-	if err != nil || !info.Mode().IsRegular() {
-		return false
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("infergo: inspect cached runtime library: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
 	}
 	marker, err := os.ReadFile(markerPath)
-	return err == nil && strings.TrimSpace(string(marker)) == digest
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("infergo: read runtime verification marker: %w", err)
+	}
+	expectedDigest := strings.TrimSpace(string(marker))
+	if !validSHA256(expectedDigest) {
+		return false, nil
+	}
+	actualDigest, err := fileDigest(libraryPath)
+	if err != nil {
+		return false, fmt.Errorf("infergo: verify cached runtime library: %w", err)
+	}
+	return actualDigest == expectedDigest, nil
+}
+
+func validSHA256(digest string) bool {
+	decoded, err := hex.DecodeString(digest)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func fileDigest(path string) (result string, resultErr error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { resultErr = errors.Join(resultErr, file.Close()) }()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func downloadArtifact(

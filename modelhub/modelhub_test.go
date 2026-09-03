@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestFetchDownloadsVerifiesAndCaches(t *testing.T) {
@@ -85,6 +88,29 @@ func TestOfflineCacheMiss(t *testing.T) {
 	}
 }
 
+func TestOfflineCacheCorruption(t *testing.T) {
+	t.Parallel()
+	cache := t.TempDir()
+	contents := []byte("model")
+	digest := sha256.Sum256(contents)
+	digestText := hex.EncodeToString(digest[:])
+	artifact := Artifact{Name: "model.onnx", URL: "https://example.com/model.onnx", SHA256: digestText, Size: int64(len(contents))}
+	target := filepath.Join(cache, digestText, artifact.Name)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("wrong"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(WithCacheDir(cache), WithOffline(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Fetch(t.Context(), artifact); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Fetch() error = %v, want ErrCorrupt", err)
+	}
+}
+
 func TestHuggingFaceArtifact(t *testing.T) {
 	t.Parallel()
 	digest := sha256.Sum256([]byte("model"))
@@ -111,6 +137,53 @@ func TestMaximumSize(t *testing.T) {
 	t.Parallel()
 	if _, err := New(WithMaximumSize(0)); err == nil {
 		t.Fatal("New() error = nil")
+	}
+	if _, err := New(WithMaximumSize(math.MaxInt64)); err == nil {
+		t.Fatal("New(WithMaximumSize(MaxInt64)) error = nil")
+	}
+	if _, err := New(WithConcurrency(0)); err == nil {
+		t.Fatal("New(WithConcurrency(0)) error = nil")
+	}
+}
+
+func TestFetchAllUsesBoundedConcurrency(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{}, 3)
+	release := make(chan struct{})
+	contents := []byte("model")
+	digest := sha256.Sum256(contents)
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		started <- struct{}{}
+		<-release
+		return response(contents), nil
+	})}
+	client, err := New(WithCacheDir(t.TempDir()), WithHTTPClient(httpClient), WithConcurrency(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := make([]Artifact, 3)
+	for index := range artifacts {
+		artifacts[index] = Artifact{
+			Name: fmt.Sprintf("model-%d.onnx", index), URL: fmt.Sprintf("https://example.com/model-%d.onnx", index),
+			SHA256: hex.EncodeToString(digest[:]), Size: int64(len(contents)),
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, fetchErr := client.FetchAll(t.Context(), artifacts)
+		done <- fetchErr
+	}()
+	<-started
+	<-started
+	select {
+	case <-started:
+		close(release)
+		t.Fatal("FetchAll() exceeded its concurrency limit")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

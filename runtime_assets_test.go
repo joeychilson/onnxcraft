@@ -131,14 +131,27 @@ func TestVerifiedRuntimeExists(t *testing.T) {
 	if err := os.WriteFile(library, []byte("library"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(marker, []byte("digest\n"), 0o600); err != nil {
+	digest := sha256.Sum256([]byte("library"))
+	digestText := hex.EncodeToString(digest[:])
+	if err := os.WriteFile(marker, []byte(digestText+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !verifiedRuntimeExists(library, marker, "digest") {
+	valid, err := verifiedRuntimeExists(library, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !valid {
 		t.Fatal("verifiedRuntimeExists() = false")
 	}
-	if verifiedRuntimeExists(library, marker, "other") {
-		t.Fatal("verifiedRuntimeExists() accepted a stale marker")
+	if writeErr := os.WriteFile(library, []byte("corrupt"), 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	valid, err = verifiedRuntimeExists(library, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valid {
+		t.Fatal("verifiedRuntimeExists() accepted a corrupt library")
 	}
 }
 

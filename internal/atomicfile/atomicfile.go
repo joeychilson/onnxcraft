@@ -3,20 +3,13 @@
 package atomicfile
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 )
 
-// Replace atomically installs source at target via rename, removing target
-// first when the platform does not replace on rename (Windows).
+// Replace atomically installs source at target via the platform rename
+// operation. Source and target must be on the same filesystem.
 func Replace(source, target string) error {
-	if err := os.Rename(source, target); err == nil {
-		return nil
-	}
-	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	return os.Rename(source, target)
 }
 
@@ -36,8 +29,15 @@ func Write(path string, data []byte, perm os.FileMode) error {
 		_ = file.Close()
 		return err
 	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return Replace(temporaryPath, path)
+	if err := Replace(temporaryPath, path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }

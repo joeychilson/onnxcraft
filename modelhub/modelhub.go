@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,12 +19,19 @@ import (
 	"time"
 
 	"github.com/joeychilson/infergo/internal/atomicfile"
+	"github.com/joeychilson/infergo/internal/filelock"
 )
 
-const defaultMaximumSize = int64(10 << 30)
+const (
+	defaultMaximumSize = int64(10 << 30)
+	defaultConcurrency = 4
+)
 
 // ErrNotCached is returned in offline mode when an artifact is unavailable.
 var ErrNotCached = errors.New("modelhub: artifact is not cached")
+
+// ErrCorrupt is returned when an offline cached artifact fails verification.
+var ErrCorrupt = errors.New("modelhub: cached artifact is corrupt")
 
 // Artifact identifies one immutable model file.
 type Artifact struct {
@@ -50,21 +58,31 @@ type BundlePaths struct {
 type Option func(*clientConfig) error
 
 type clientConfig struct {
-	cacheDir string
-	client   *http.Client
-	offline  bool
-	maxSize  int64
+	cacheDir    string
+	client      *http.Client
+	offline     bool
+	maxSize     int64
+	concurrency int
 }
 
 // Client downloads verified model artifacts into a local cache.
 type Client struct {
-	cacheDir string
-	client   *http.Client
-	offline  bool
-	maxSize  int64
+	cacheDir    string
+	client      *http.Client
+	offline     bool
+	maxSize     int64
+	concurrency int
 }
 
-var artifactLocks sync.Map
+var artifactLocks = struct {
+	sync.Mutex
+	entries map[string]*artifactLock
+}{entries: make(map[string]*artifactLock)}
+
+type artifactLock struct {
+	mutex sync.Mutex
+	users int
+}
 
 // WithCacheDir stores artifacts beneath path.
 func WithCacheDir(path string) Option {
@@ -99,7 +117,7 @@ func WithOffline(enabled bool) Option {
 // WithMaximumSize limits a single download. The default is 10 GiB.
 func WithMaximumSize(bytes int64) Option {
 	return func(config *clientConfig) error {
-		if bytes < 1 {
+		if bytes < 1 || bytes == math.MaxInt64 {
 			return errors.New("modelhub: maximum size must be positive")
 		}
 		config.maxSize = bytes
@@ -107,11 +125,23 @@ func WithMaximumSize(bytes int64) Option {
 	}
 }
 
+// WithConcurrency limits concurrent artifact downloads. The default is four.
+func WithConcurrency(count int) Option {
+	return func(config *clientConfig) error {
+		if count < 1 {
+			return errors.New("modelhub: concurrency must be positive")
+		}
+		config.concurrency = count
+		return nil
+	}
+}
+
 // New creates a model artifact client.
 func New(options ...Option) (*Client, error) {
 	config := clientConfig{
-		client:  &http.Client{Timeout: 30 * time.Minute},
-		maxSize: defaultMaximumSize,
+		client:      &http.Client{Timeout: 30 * time.Minute},
+		maxSize:     defaultMaximumSize,
+		concurrency: defaultConcurrency,
 	}
 	for _, option := range options {
 		if option == nil {
@@ -133,10 +163,11 @@ func New(options ...Option) (*Client, error) {
 		return nil, fmt.Errorf("modelhub: resolve cache directory: %w", err)
 	}
 	return &Client{
-		cacheDir: absolute,
-		client:   config.client,
-		offline:  config.offline,
-		maxSize:  config.maxSize,
+		cacheDir:    absolute,
+		client:      config.client,
+		offline:     config.offline,
+		maxSize:     config.maxSize,
+		concurrency: config.concurrency,
 	}, nil
 }
 
@@ -199,21 +230,34 @@ func (c *Client) fetchTarget(ctx context.Context, artifact Artifact, digest, tar
 	if artifact.Size > c.maxSize {
 		return fmt.Errorf("modelhub: artifact %s exceeds the %d-byte limit", artifact.Name, c.maxSize)
 	}
-	lockValue, _ := artifactLocks.LoadOrStore(target, &sync.Mutex{})
-	lock := lockValue.(*sync.Mutex)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := lockArtifact(target)
+	defer unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	if valid, cacheErr := validFile(target, artifact, digest); cacheErr != nil {
+	if valid, cacheErr := validFile(target, artifact, digest); cacheErr != nil && !errors.Is(cacheErr, ErrCorrupt) {
 		return cacheErr
 	} else if valid {
 		return nil
-	}
-	if c.offline {
+	} else if c.offline {
+		if cacheErr != nil {
+			return cacheErr
+		}
 		return fmt.Errorf("%w: %s", ErrNotCached, artifact.Name)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return fmt.Errorf("modelhub: create cache directory: %w", err)
+	}
+	processLock, err := filelock.Acquire(ctx, target+".lock")
+	if err != nil {
+		return fmt.Errorf("modelhub: lock artifact cache: %w", err)
+	}
+	defer func() { _ = processLock.Close() }()
+	if valid, cacheErr := validFile(target, artifact, digest); cacheErr != nil && !errors.Is(cacheErr, ErrCorrupt) {
+		return cacheErr
+	} else if valid {
+		return nil
 	}
 	if err := c.download(ctx, artifact, digest, target); err != nil {
 		return err
@@ -233,12 +277,19 @@ func (c *Client) FetchAll(ctx context.Context, artifacts []Artifact) ([]string, 
 		return nil, err
 	}
 	paths := make([]string, len(artifacts))
-	for index, artifact := range artifacts {
+	errorsByIndex := parallel(c.concurrency, len(artifacts), func(index int) error {
+		artifact := artifacts[index]
 		path, err := c.Fetch(ctx, artifact)
 		if err != nil {
-			return nil, fmt.Errorf("modelhub: fetch artifact %d: %w", index, err)
+			return fmt.Errorf("modelhub: fetch artifact %d: %w", index, err)
 		}
 		paths[index] = path
+		return nil
+	})
+	for _, err := range errorsByIndex {
+		if err != nil {
+			return nil, err
+		}
 	}
 	return paths, nil
 }
@@ -284,12 +335,23 @@ func (c *Client) FetchBundle(ctx context.Context, bundle Bundle) (BundlePaths, e
 	key := hex.EncodeToString(hasher.Sum(nil))
 	directory := filepath.Join(c.cacheDir, "bundles", bundle.Name+"-"+key[:16])
 	result := BundlePaths{Directory: directory, Files: make(map[string]string, len(bundle.Artifacts))}
-	for index, artifact := range bundle.Artifacts {
+	targets := make([]string, len(bundle.Artifacts))
+	errorsByIndex := parallel(c.concurrency, len(bundle.Artifacts), func(index int) error {
+		artifact := bundle.Artifacts[index]
 		target := filepath.Join(directory, artifact.Name)
 		if err := c.fetchTarget(ctx, artifact, digests[index], target); err != nil {
-			return BundlePaths{}, fmt.Errorf("modelhub: fetch bundle artifact %q: %w", artifact.Name, err)
+			return fmt.Errorf("modelhub: fetch bundle artifact %q: %w", artifact.Name, err)
 		}
-		result.Files[artifact.Name] = target
+		targets[index] = target
+		return nil
+	})
+	for _, err := range errorsByIndex {
+		if err != nil {
+			return BundlePaths{}, err
+		}
+	}
+	for index, artifact := range bundle.Artifacts {
+		result.Files[artifact.Name] = targets[index]
 	}
 	return result, nil
 }
@@ -305,6 +367,7 @@ func (c *Client) download(ctx context.Context, artifact Artifact, digest, target
 	}
 	defer func() { resultErr = errors.Join(resultErr, response.Body.Close()) }()
 	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 		return fmt.Errorf("modelhub: download %s: unexpected HTTP status %s", artifact.Name, response.Status)
 	}
 	if response.ContentLength > c.maxSize {
@@ -312,9 +375,6 @@ func (c *Client) download(ctx context.Context, artifact Artifact, digest, target
 	}
 	if artifact.Size > 0 && response.ContentLength >= 0 && response.ContentLength != artifact.Size {
 		return fmt.Errorf("modelhub: download %s reports %d bytes, want %d", artifact.Name, response.ContentLength, artifact.Size)
-	}
-	if mkdirErr := os.MkdirAll(filepath.Dir(target), 0o755); mkdirErr != nil {
-		return fmt.Errorf("modelhub: create cache directory: %w", mkdirErr)
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(target), ".download-*")
 	if err != nil {
@@ -329,6 +389,9 @@ func (c *Client) download(ctx context.Context, artifact Artifact, digest, target
 
 	hasher := sha256.New()
 	written, copyErr := copyLimited(temporary, hasher, response.Body, c.maxSize)
+	if copyErr == nil {
+		copyErr = temporary.Sync()
+	}
 	closeErr := temporary.Close()
 	if copyErr != nil {
 		return errors.Join(fmt.Errorf("modelhub: download %s: %w", artifact.Name, copyErr), closeErr)
@@ -388,25 +451,81 @@ func validFile(path string, artifact Artifact, digest string) (valid bool, resul
 	if err != nil {
 		return false, fmt.Errorf("modelhub: inspect cached artifact: %w", err)
 	}
-	if !info.Mode().IsRegular() || artifact.Size > 0 && info.Size() != artifact.Size {
-		return false, nil
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: %s is not a regular file", ErrCorrupt, path)
+	}
+	if artifact.Size > 0 && info.Size() != artifact.Size {
+		return false, fmt.Errorf("%w: %s has size %d, want %d", ErrCorrupt, path, info.Size(), artifact.Size)
 	}
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
 		return false, fmt.Errorf("modelhub: verify cached artifact: %w", err)
 	}
-	return hex.EncodeToString(hasher.Sum(nil)) == digest, nil
+	actual := hex.EncodeToString(hasher.Sum(nil))
+	if actual != digest {
+		return false, fmt.Errorf("%w: %s has SHA-256 %s, want %s", ErrCorrupt, path, actual, digest)
+	}
+	return true, nil
 }
 
 func copyLimited(destination io.Writer, hasher hash.Hash, source io.Reader, maximum int64) (int64, error) {
-	written, err := io.Copy(io.MultiWriter(destination, hasher), io.LimitReader(source, maximum+1))
-	if err != nil {
+	writer := io.MultiWriter(destination, hasher)
+	written, err := io.CopyN(writer, source, maximum)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return written, err
 	}
-	if written > maximum {
-		return written, fmt.Errorf("modelhub: artifact exceeds the %d-byte limit", maximum)
+	if errors.Is(err, io.EOF) {
+		return written, nil
+	}
+	var extra [1]byte
+	read, readErr := source.Read(extra[:])
+	if read > 0 {
+		return written + int64(read), fmt.Errorf("modelhub: artifact exceeds the %d-byte limit", maximum)
+	}
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return written, readErr
 	}
 	return written, nil
+}
+
+func lockArtifact(path string) func() {
+	artifactLocks.Lock()
+	entry := artifactLocks.entries[path]
+	if entry == nil {
+		entry = &artifactLock{}
+		artifactLocks.entries[path] = entry
+	}
+	entry.users++
+	artifactLocks.Unlock()
+	entry.mutex.Lock()
+	return func() {
+		entry.mutex.Unlock()
+		artifactLocks.Lock()
+		entry.users--
+		if entry.users == 0 {
+			delete(artifactLocks.entries, path)
+		}
+		artifactLocks.Unlock()
+	}
+}
+
+func parallel(concurrency, count int, function func(int) error) []error {
+	errorsByIndex := make([]error, count)
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(concurrency, count) {
+		workers.Go(func() {
+			for index := range jobs {
+				errorsByIndex[index] = function(index)
+			}
+		})
+	}
+	for index := range count {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+	return errorsByIndex
 }
 
 func safePathParts(path string) ([]string, error) {
