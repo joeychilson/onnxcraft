@@ -169,11 +169,11 @@ func (m *Model) Detect(ctx context.Context, source image.Image, options DetectOp
 	if err != nil {
 		return nil, fmt.Errorf("yolos: run model: %w", err)
 	}
-	logits, err := outputs[0].Data[float32]()
+	logits, err := infergo.BorrowData[float32](outputs[0])
 	if err != nil {
 		return nil, fmt.Errorf("yolos: read logits: %w", err)
 	}
-	boxes, err := outputs[1].Data[float32]()
+	boxes, err := infergo.BorrowData[float32](outputs[1])
 	if err != nil {
 		return nil, fmt.Errorf("yolos: read boxes: %w", err)
 	}

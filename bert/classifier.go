@@ -142,7 +142,7 @@ func (m *Classifier) ClassifyBatch(
 	if err != nil {
 		return nil, fmt.Errorf("bert: run classifier: %w", err)
 	}
-	logits, err := outputs[0].Data[float32]()
+	logits, err := infergo.BorrowData[float32](outputs[0])
 	if err != nil {
 		return nil, fmt.Errorf("bert: read classifier logits: %w", err)
 	}

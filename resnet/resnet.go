@@ -215,7 +215,7 @@ func (m *Model) ClassifyBatch(
 	if err != nil {
 		return nil, fmt.Errorf("resnet: run model: %w", err)
 	}
-	logits, err := outputs[0].Data[float32]()
+	logits, err := infergo.BorrowData[float32](outputs[0])
 	if err != nil {
 		return nil, fmt.Errorf("resnet: read logits: %w", err)
 	}

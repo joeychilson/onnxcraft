@@ -112,6 +112,17 @@ func Data[T TensorData](tensor Tensor) ([]T, error) {
 	return tensor.Data[T]()
 }
 
+// BorrowData returns a read-only view of tensor's elements as T without
+// copying them. The caller must not modify the returned slice. Use Data when
+// ownership or mutation is required.
+func BorrowData[T TensorData](tensor Tensor) ([]T, error) {
+	data, ok := tensor.data.([]T)
+	if !ok {
+		return nil, fmt.Errorf("infergo: tensor contains %s, not %s", tensor.dataType, dataTypeOf[T]())
+	}
+	return data, nil
+}
+
 // Shape returns a copy of the tensor dimensions.
 func (t Tensor) Shape() []int64 {
 	return slices.Clone(t.shape)

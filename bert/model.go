@@ -222,7 +222,7 @@ func (m *Model) FillMask(ctx context.Context, text string, options FillMaskOptio
 	if err != nil {
 		return nil, fmt.Errorf("bert: run model: %w", err)
 	}
-	logits, err := outputs[0].Data[float32]()
+	logits, err := infergo.BorrowData[float32](outputs[0])
 	if err != nil {
 		return nil, fmt.Errorf("bert: read logits: %w", err)
 	}

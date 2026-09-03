@@ -97,6 +97,25 @@ func TestTakeTensorAdoptsData(t *testing.T) {
 	}
 }
 
+func TestBorrowDataReturnsView(t *testing.T) {
+	t.Parallel()
+	values := []float32{1, 2}
+	tensor, err := TakeTensor([]int64{2}, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := BorrowData[float32](tensor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &view[0] != &values[0] {
+		t.Fatal("BorrowData() copied tensor storage")
+	}
+	if _, err := BorrowData[int64](tensor); err == nil {
+		t.Fatal("BorrowData[int64]() accepted a float32 tensor")
+	}
+}
+
 func TestTensorSupportsZeroDimensions(t *testing.T) {
 	t.Parallel()
 	tensor, err := NewTensor([]int64{2, 0, 3}, []int64{})
@@ -151,6 +170,32 @@ func BenchmarkTensorConstruction(b *testing.B) {
 	b.Run("take", func(b *testing.B) {
 		for b.Loop() {
 			if _, err := TakeTensor(shape, data); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+var benchmarkTensorData []float32
+
+func BenchmarkTensorAccess(b *testing.B) {
+	tensor := MustTensor([]int64{30_522}, make([]float32, 30_522))
+	b.Run("copy", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			var err error
+			benchmarkTensorData, err = tensor.Data[float32]()
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("borrow", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			var err error
+			benchmarkTensorData, err = BorrowData[float32](tensor)
+			if err != nil {
 				b.Fatal(err)
 			}
 		}
