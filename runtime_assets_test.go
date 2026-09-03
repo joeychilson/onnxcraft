@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/joeychilson/infergo/internal/atomicfile"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -103,11 +105,12 @@ func TestExtractLibrary(t *testing.T) {
 			if createErr != nil {
 				t.Fatal(createErr)
 			}
+			if extractErr := extractLibrary(archivePath, "runtime."+format, libraryName, file); extractErr != nil {
+				_ = file.Close()
+				t.Fatal(extractErr)
+			}
 			if closeErr := file.Close(); closeErr != nil {
 				t.Fatal(closeErr)
-			}
-			if extractErr := extractLibrary(archivePath, "runtime."+format, libraryName, destination); extractErr != nil {
-				t.Fatal(extractErr)
 			}
 			got, err := os.ReadFile(destination)
 			if err != nil {
@@ -150,7 +153,7 @@ func TestReplaceFileReplacesExistingDestination(t *testing.T) {
 	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := replaceFile(source, destination); err != nil {
+	if err := atomicfile.Replace(source, destination); err != nil {
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(destination)

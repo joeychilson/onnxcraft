@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/joeychilson/infergo/internal/atomicfile"
 )
 
 const defaultMaximumSize = int64(10 << 30)
@@ -344,7 +346,7 @@ func (c *Client) download(ctx context.Context, artifact Artifact, digest, target
 	if err := os.Chmod(temporaryPath, 0o644); err != nil {
 		return fmt.Errorf("modelhub: set artifact permissions: %w", err)
 	}
-	if err := replace(temporaryPath, target); err != nil {
+	if err := atomicfile.Replace(temporaryPath, target); err != nil {
 		return fmt.Errorf("modelhub: cache artifact: %w", err)
 	}
 	return nil
@@ -405,16 +407,6 @@ func copyLimited(destination io.Writer, hasher hash.Hash, source io.Reader, maxi
 		return written, fmt.Errorf("modelhub: artifact exceeds the %d-byte limit", maximum)
 	}
 	return written, nil
-}
-
-func replace(source, target string) error {
-	if err := os.Rename(source, target); err == nil {
-		return nil
-	}
-	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return os.Rename(source, target)
 }
 
 func safePathParts(path string) ([]string, error) {

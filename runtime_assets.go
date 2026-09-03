@@ -15,9 +15,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/joeychilson/infergo/internal/atomicfile"
 )
 
 const releaseBaseURL = "https://github.com/microsoft/onnxruntime/releases/download/v" + RuntimeVersion
+
+// maxExtractedLibrarySize caps a decompressed native library to contain
+// archive bombs. Compressed artifacts are at most ~82 MB and hash-verified,
+// so 512 MiB leaves ample headroom for the extracted shared library.
+const maxExtractedLibrarySize = 512 << 20
 
 var (
 	currentOS   = runtime.GOOS
@@ -72,13 +79,13 @@ func ensureRuntime(ctx context.Context, config runtimeConfig) (string, error) {
 	}
 
 	runtimeDir := filepath.Join(config.cacheDir, "onnxruntime", RuntimeVersion, currentOS+"-"+currentArch)
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return "", fmt.Errorf("infergo: create runtime cache: %w", err)
-	}
 	libraryPath := filepath.Join(runtimeDir, artifact.libraryName)
 	markerPath := libraryPath + ".verified"
 	if verifiedRuntimeExists(libraryPath, markerPath, artifact.digest) {
 		return libraryPath, nil
+	}
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		return "", fmt.Errorf("infergo: create runtime cache: %w", err)
 	}
 
 	archiveFile, err := downloadArtifact(
@@ -99,18 +106,19 @@ func ensureRuntime(ctx context.Context, config runtimeConfig) (string, error) {
 		return "", fmt.Errorf("infergo: create temporary runtime library: %w", err)
 	}
 	temporaryPath := temporaryLibrary.Name()
-	if err := temporaryLibrary.Close(); err != nil {
-		return "", fmt.Errorf("infergo: close temporary runtime library: %w", err)
-	}
 	defer func() { _ = os.Remove(temporaryPath) }()
 
-	if err := extractLibrary(archiveFile, artifact.archiveName, artifact.libraryName, temporaryPath); err != nil {
+	if err := extractLibrary(archiveFile, artifact.archiveName, artifact.libraryName, temporaryLibrary); err != nil {
+		_ = temporaryLibrary.Close()
 		return "", err
+	}
+	if err := temporaryLibrary.Close(); err != nil {
+		return "", fmt.Errorf("infergo: close temporary runtime library: %w", err)
 	}
 	if err := os.Chmod(temporaryPath, 0o755); err != nil {
 		return "", fmt.Errorf("infergo: make runtime library executable: %w", err)
 	}
-	if err := replaceFile(temporaryPath, libraryPath); err != nil {
+	if err := atomicfile.Replace(temporaryPath, libraryPath); err != nil {
 		return "", fmt.Errorf("infergo: install runtime library: %w", err)
 	}
 	if err := writeMarker(markerPath, artifact.digest); err != nil {
@@ -185,14 +193,14 @@ func downloadArtifact(
 	return path, nil
 }
 
-func extractLibrary(archivePath, archiveName, libraryName, destination string) error {
+func extractLibrary(archivePath, archiveName, libraryName string, destination *os.File) error {
 	if strings.HasSuffix(archiveName, ".zip") {
 		return extractZipLibrary(archivePath, libraryName, destination)
 	}
 	return extractTarLibrary(archivePath, libraryName, destination)
 }
 
-func extractZipLibrary(archivePath, libraryName, destination string) error {
+func extractZipLibrary(archivePath, libraryName string, destination *os.File) error {
 	archive, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return fmt.Errorf("infergo: open runtime zip: %w", err)
@@ -201,6 +209,9 @@ func extractZipLibrary(archivePath, libraryName, destination string) error {
 	for _, file := range archive.File {
 		if filepath.Base(filepath.ToSlash(file.Name)) != libraryName || file.FileInfo().IsDir() {
 			continue
+		}
+		if file.UncompressedSize64 > maxExtractedLibrarySize {
+			return fmt.Errorf("infergo: runtime library exceeds the %d-byte limit", maxExtractedLibrarySize)
 		}
 		reader, err := file.Open()
 		if err != nil {
@@ -213,7 +224,7 @@ func extractZipLibrary(archivePath, libraryName, destination string) error {
 	return fmt.Errorf("infergo: runtime library %q not found in zip", libraryName)
 }
 
-func extractTarLibrary(archivePath, libraryName, destination string) error {
+func extractTarLibrary(archivePath, libraryName string, destination *os.File) error {
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("infergo: open runtime archive: %w", err)
@@ -235,50 +246,28 @@ func extractTarLibrary(archivePath, libraryName, destination string) error {
 			return fmt.Errorf("infergo: read runtime archive: %w", err)
 		}
 		if filepath.Base(filepath.ToSlash(header.Name)) == libraryName && header.Typeflag == tar.TypeReg {
+			if header.Size < 0 || header.Size > maxExtractedLibrarySize {
+				return fmt.Errorf("infergo: runtime library exceeds the %d-byte limit", maxExtractedLibrarySize)
+			}
 			return copyLibrary(destination, io.LimitReader(reader, header.Size))
 		}
 	}
 	return fmt.Errorf("infergo: runtime library %q not found in archive", libraryName)
 }
 
-func copyLibrary(destination string, source io.Reader) error {
-	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_TRUNC, 0o600)
+func copyLibrary(destination *os.File, source io.Reader) error {
+	written, err := io.Copy(destination, io.LimitReader(source, maxExtractedLibrarySize+1))
 	if err != nil {
-		return fmt.Errorf("infergo: open extracted runtime library: %w", err)
-	}
-	_, copyErr := io.Copy(file, source)
-	closeErr := file.Close()
-	if err := errors.Join(copyErr, closeErr); err != nil {
 		return fmt.Errorf("infergo: extract runtime library: %w", err)
+	}
+	if written > maxExtractedLibrarySize {
+		return fmt.Errorf("infergo: extracted runtime library exceeds the %d-byte limit", maxExtractedLibrarySize)
 	}
 	return nil
 }
 
-func replaceFile(source, destination string) error {
-	if err := os.Rename(source, destination); err == nil {
-		return nil
-	}
-	if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return os.Rename(source, destination)
-}
-
 func writeMarker(path, digest string) error {
-	file, err := os.CreateTemp(filepath.Dir(path), ".verified-*")
-	if err != nil {
-		return fmt.Errorf("infergo: create runtime verification marker: %w", err)
-	}
-	temporaryPath := file.Name()
-	defer func() { _ = os.Remove(temporaryPath) }()
-	if _, err := io.WriteString(file, digest+"\n"); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("infergo: write runtime verification marker: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("infergo: close runtime verification marker: %w", err)
-	}
-	if err := replaceFile(temporaryPath, path); err != nil {
+	if err := atomicfile.Write(path, []byte(digest+"\n"), 0o644); err != nil {
 		return fmt.Errorf("infergo: install runtime verification marker: %w", err)
 	}
 	return nil
