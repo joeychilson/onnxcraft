@@ -1,0 +1,89 @@
+package infergo
+
+import "testing"
+
+func TestValidateNames(t *testing.T) {
+	t.Parallel()
+	if err := validateNames("input", []string{"left", "right"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, names := range [][]string{nil, {""}, {"value", "value"}} {
+		if err := validateNames("input", names); err == nil {
+			t.Fatalf("validateNames(%q) error = nil", names)
+		}
+	}
+}
+
+func TestSessionOptions(t *testing.T) {
+	t.Parallel()
+	config := sessionConfig{}
+	if err := WithIntraOpThreads(4)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithInterOpThreads(2)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithOptimization(OptimizationExtended)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithCoreML(map[string]string{"ModelFormat": "MLProgram"})(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithCUDA(map[string]string{"device_id": "0"})(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithTensorRT(map[string]string{"device_id": "0"})(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithOpenVINO(map[string]string{"device_type": "CPU"})(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithExecutionProvider("XNNPACK", nil)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithDirectML(0)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if config.intraOpThreads != 4 || config.interOpThreads != 2 || config.optimization != OptimizationExtended || len(config.providers) != 6 {
+		t.Fatalf("config = %+v", config)
+	}
+	if err := WithIntraOpThreads(0)(&config); err == nil {
+		t.Fatal("WithIntraOpThreads(0) error = nil")
+	}
+	if err := WithInterOpThreads(0)(&config); err == nil {
+		t.Fatal("WithInterOpThreads(0) error = nil")
+	}
+	if err := WithOptimization(OptimizationLevel(99))(&config); err == nil {
+		t.Fatal("WithOptimization(99) error = nil")
+	}
+	if err := WithDirectML(-1)(&config); err == nil {
+		t.Fatal("WithDirectML(-1) error = nil")
+	}
+	if err := WithExecutionProvider("", nil)(&config); err == nil {
+		t.Fatal("WithExecutionProvider() error = nil")
+	}
+}
+
+func TestNilResourcesCloseCleanly(t *testing.T) {
+	t.Parallel()
+	var runtime *Runtime
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var session *Session
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunNamedValidatesNames(t *testing.T) {
+	t.Parallel()
+	session := &Session{inputNames: []string{"input"}, outputNames: []string{"output"}}
+	if _, err := session.RunNamed(t.Context(), nil); err == nil {
+		t.Fatal("RunNamed() missing-input error = nil")
+	}
+	input := MustTensor([]int64{1}, []float32{1})
+	if _, err := session.RunNamed(t.Context(), map[string]Tensor{"input": input, "extra": input}); err == nil {
+		t.Fatal("RunNamed() unknown-input error = nil")
+	}
+}
