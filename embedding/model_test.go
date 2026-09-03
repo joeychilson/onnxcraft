@@ -67,6 +67,9 @@ func TestCosineSimilarity(t *testing.T) {
 	if _, err := CosineSimilarity([]float32{0}, []float32{0}); err == nil {
 		t.Fatal("CosineSimilarity() error = nil")
 	}
+	if _, err := CosineSimilarity([]float32{float32(math.Inf(1))}, []float32{1}); err == nil {
+		t.Fatal("CosineSimilarity(Inf) error = nil")
+	}
 }
 
 func TestNormalize(t *testing.T) {

@@ -89,3 +89,20 @@ func TestProcessRejectsInvalidOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessSupportsInterpolationFilters(t *testing.T) {
+	t.Parallel()
+	source := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	for _, interpolation := range []Interpolation{InterpolationBilinear, InterpolationBicubic, InterpolationNearest} {
+		_, err := Process(source, Options{
+			Width:         3,
+			Height:        3,
+			Mode:          ResizeStretch,
+			Interpolation: interpolation,
+			StdDev:        [3]float32{1, 1, 1},
+		})
+		if err != nil {
+			t.Fatalf("Process(interpolation %d): %v", interpolation, err)
+		}
+	}
+}

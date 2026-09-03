@@ -20,6 +20,8 @@ type Option func(*modelConfig) error
 type modelConfig struct {
 	width          int
 	height         int
+	resizeEdge     int
+	interpolation  vision.Interpolation
 	mean           [3]float32
 	deviation      [3]float32
 	labels         map[int]string
@@ -47,6 +49,22 @@ func WithImageSize(width, height int) Option {
 			return errors.New("resnet: image dimensions must be positive")
 		}
 		config.width, config.height = width, height
+		return nil
+	}
+}
+
+// WithResize sets the shortest edge used before the center crop and the
+// interpolation filter. The default is 256 pixels with bicubic filtering.
+func WithResize(shortestEdge int, interpolation vision.Interpolation) Option {
+	return func(config *modelConfig) error {
+		if shortestEdge < 1 {
+			return errors.New("resnet: resize edge must be positive")
+		}
+		if interpolation < vision.InterpolationBilinear || interpolation > vision.InterpolationNearest {
+			return fmt.Errorf("resnet: unsupported interpolation %d", interpolation)
+		}
+		config.resizeEdge = shortestEdge
+		config.interpolation = interpolation
 		return nil
 	}
 }
@@ -102,13 +120,15 @@ func WithSessionOptions(options ...infergo.SessionOption) Option {
 // New loads a ResNet-family image classifier.
 func New(runtime *infergo.Runtime, modelPath string, options ...Option) (*Model, error) {
 	config := modelConfig{
-		width:      224,
-		height:     224,
-		mean:       [3]float32{0.485, 0.456, 0.406},
-		deviation:  [3]float32{0.229, 0.224, 0.225},
-		labels:     labels.ImageNetMap(),
-		inputName:  "pixel_values",
-		outputName: "logits",
+		width:         224,
+		height:        224,
+		resizeEdge:    256,
+		interpolation: vision.InterpolationBicubic,
+		mean:          [3]float32{0.485, 0.456, 0.406},
+		deviation:     [3]float32{0.229, 0.224, 0.225},
+		labels:        labels.ImageNetMap(),
+		inputName:     "pixel_values",
+		outputName:    "logits",
 	}
 	for _, option := range options {
 		if option == nil {
@@ -166,12 +186,15 @@ func (m *Model) ClassifyBatch(
 	pixels := make([]float32, 0, len(sources)*pixelsPerImage)
 	for index, source := range sources {
 		processed, err := vision.Process(source, vision.Options{
-			Width:      m.config.width,
-			Height:     m.config.height,
-			Mode:       vision.ResizeFill,
-			Mean:       m.config.mean,
-			StdDev:     m.config.deviation,
-			CenterCrop: true,
+			Width:         m.config.width,
+			Height:        m.config.height,
+			ShortEdge:     m.config.resizeEdge,
+			LongEdge:      math.MaxInt,
+			Mode:          vision.ResizeShortestEdge,
+			Interpolation: m.config.interpolation,
+			Mean:          m.config.mean,
+			StdDev:        m.config.deviation,
+			CenterCrop:    true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("resnet: preprocess image %d: %w", index, err)

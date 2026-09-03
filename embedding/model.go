@@ -182,7 +182,7 @@ func (m *Model) Embed(ctx context.Context, texts []string, options EmbedOptions)
 		return [][]float32{}, nil
 	}
 	if options.MaxLength == 0 {
-		options.MaxLength = 512
+		options.MaxLength = 256
 	}
 	if options.BatchSize == 0 {
 		options.BatchSize = 32
@@ -230,8 +230,9 @@ func CosineSimilarity(left, right []float32) (float32, error) {
 	var dot, leftSquared, rightSquared float64
 	for index, leftValue := range left {
 		rightValue := right[index]
-		if math.IsNaN(float64(leftValue)) || math.IsNaN(float64(rightValue)) {
-			return 0, errors.New("embedding: vector contains NaN")
+		if math.IsNaN(float64(leftValue)) || math.IsInf(float64(leftValue), 0) ||
+			math.IsNaN(float64(rightValue)) || math.IsInf(float64(rightValue), 0) {
+			return 0, errors.New("embedding: vector contains a non-finite value")
 		}
 		dot += float64(leftValue) * float64(rightValue)
 		leftSquared += float64(leftValue) * float64(leftValue)
@@ -240,7 +241,11 @@ func CosineSimilarity(left, right []float32) (float32, error) {
 	if leftSquared == 0 || rightSquared == 0 {
 		return 0, errors.New("embedding: cosine similarity is undefined for a zero vector")
 	}
-	return float32(dot / math.Sqrt(leftSquared*rightSquared)), nil
+	result := dot / math.Sqrt(leftSquared*rightSquared)
+	if math.IsNaN(result) || math.IsInf(result, 0) {
+		return 0, errors.New("embedding: cosine similarity is not finite")
+	}
+	return float32(result), nil
 }
 
 func (m *Model) embedBatch(ctx context.Context, texts []string, maxLength int) ([][]float32, error) {

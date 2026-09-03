@@ -5,12 +5,16 @@ import (
 	"testing"
 
 	"github.com/joeychilson/infergo"
+	"github.com/joeychilson/infergo/vision"
 )
 
 func TestModelOptions(t *testing.T) {
 	t.Parallel()
 	config := modelConfig{}
 	if err := WithImageSize(320, 240)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithResize(384, vision.InterpolationNearest)(&config); err != nil {
 		t.Fatal(err)
 	}
 	if err := WithNormalization([3]float32{1, 2, 3}, [3]float32{4, 5, 6})(&config); err != nil {
@@ -27,7 +31,7 @@ func TestModelOptions(t *testing.T) {
 	if err := WithSessionOptions(infergo.WithOptimization(infergo.OptimizationBasic))(&config); err != nil {
 		t.Fatal(err)
 	}
-	if config.width != 320 || config.height != 240 || config.labels[0] != "zero" || config.inputName != "input" || config.outputName != "output" {
+	if config.width != 320 || config.height != 240 || config.resizeEdge != 384 || config.interpolation != vision.InterpolationNearest || config.labels[0] != "zero" || config.inputName != "input" || config.outputName != "output" {
 		t.Fatalf("config = %+v", config)
 	}
 }
@@ -37,6 +41,9 @@ func TestModelOptionsRejectInvalidValues(t *testing.T) {
 	config := modelConfig{}
 	if err := WithImageSize(0, 1)(&config); err == nil {
 		t.Fatal("WithImageSize() error = nil")
+	}
+	if err := WithResize(0, vision.InterpolationBicubic)(&config); err == nil {
+		t.Fatal("WithResize() error = nil")
 	}
 	if err := WithNormalization([3]float32{float32(math.NaN())}, [3]float32{1, 1, 1})(&config); err == nil {
 		t.Fatal("WithNormalization(NaN) error = nil")

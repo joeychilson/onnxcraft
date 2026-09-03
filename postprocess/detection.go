@@ -33,11 +33,13 @@ type DetectionOptions struct {
 	MaxDetections int
 	MinScore      float32
 	IoUThreshold  float32
+	ApplyNMS      bool
 }
 
 // DetectDETR converts flattened DETR-style logits and normalized center boxes
-// into class-aware, non-max-suppressed pixel detections. Classes absent from
-// Labels, including the usual no-object class, are ignored.
+// into class-aware pixel detections. The final logit is treated as DETR's
+// no-object class. Non-maximum suppression is optional because DETR-family
+// models are trained to produce a set of non-duplicated predictions.
 func DetectDETR(logits, boxes []float32, imageSize image.Point, options DetectionOptions) ([]Detection, error) {
 	if len(boxes) == 0 || len(boxes)%4 != 0 {
 		return nil, errors.New("postprocess: boxes must contain a positive multiple of four values")
@@ -60,6 +62,10 @@ func DetectDETR(logits, boxes []float32, imageSize image.Point, options Detectio
 	}
 
 	classCount := len(logits) / boxCount
+	if classCount < 2 {
+		return nil, errors.New("postprocess: DETR logits must include at least one object class and the no-object class")
+	}
+	noObjectClass := classCount - 1
 	detections := make([]Detection, 0, boxCount)
 	for boxIndex := range boxCount {
 		boxValues := boxes[boxIndex*4 : (boxIndex+1)*4]
@@ -75,7 +81,7 @@ func DetectDETR(logits, boxes []float32, imageSize image.Point, options Detectio
 		if err != nil {
 			return nil, fmt.Errorf("postprocess: box %d: %w", boxIndex, err)
 		}
-		class := math32.TopK(scores, 1)[0]
+		class := math32.TopK(scores[:noObjectClass], 1)[0]
 		label, ok := options.Labels[class]
 		if !ok || scores[class] < options.MinScore {
 			continue
@@ -84,7 +90,13 @@ func DetectDETR(logits, boxes []float32, imageSize image.Point, options Detectio
 		detections = append(detections, Detection{Class: class, Label: label, Score: scores[class], Box: box})
 	}
 
-	detections = NonMaxSuppression(detections, options.IoUThreshold)
+	if options.ApplyNMS {
+		detections = NonMaxSuppression(detections, options.IoUThreshold)
+	} else {
+		slices.SortStableFunc(detections, func(left, right Detection) int {
+			return cmp.Compare(right.Score, left.Score)
+		})
+	}
 	return slices.Clone(detections[:min(len(detections), options.MaxDetections)]), nil
 }
 

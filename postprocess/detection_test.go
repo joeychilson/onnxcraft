@@ -26,6 +26,7 @@ func TestDetectDETRFiltersSuppressesAndLimits(t *testing.T) {
 		MaxDetections: 2,
 		MinScore:      0.5,
 		IoUThreshold:  0.45,
+		ApplyNMS:      true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +40,45 @@ func TestDetectDETRFiltersSuppressesAndLimits(t *testing.T) {
 	}
 	if got[1].Box.X1 != 0 || got[1].Box.Y1 != 0 {
 		t.Fatalf("clipped box = %+v", got[1].Box)
+	}
+}
+
+func TestDetectDETRExcludesNoObjectFromSelection(t *testing.T) {
+	t.Parallel()
+	got, err := DetectDETR(
+		[]float32{2, 1, 3},
+		[]float32{0.5, 0.5, 0.25, 0.25},
+		image.Pt(100, 100),
+		DetectionOptions{Labels: map[int]string{0: "object"}, MaxDetections: 1, MinScore: 0.2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Class != 0 {
+		t.Fatalf("DetectDETR() = %+v", got)
+	}
+}
+
+func TestDetectDETRDoesNotApplyNMSByDefault(t *testing.T) {
+	t.Parallel()
+	logits := []float32{4, 0, 4, 0}
+	boxes := []float32{0.5, 0.5, 0.4, 0.4, 0.5, 0.5, 0.4, 0.4}
+	options := DetectionOptions{Labels: map[int]string{0: "object"}, MaxDetections: 2}
+	got, err := DetectDETR(logits, boxes, image.Pt(100, 100), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("DetectDETR() returned %d detections, want 2", len(got))
+	}
+	options.ApplyNMS = true
+	options.IoUThreshold = 0.5
+	got, err = DetectDETR(logits, boxes, image.Pt(100, 100), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("DetectDETR() with NMS returned %d detections, want 1", len(got))
 	}
 }
 
@@ -75,10 +115,11 @@ func TestDetectDETRRejectsMalformedOutputs(t *testing.T) {
 		size   image.Point
 		option DetectionOptions
 	}{
-		{name: "boxes", logits: []float32{1}, boxes: []float32{1}, size: image.Pt(1, 1), option: validOptions},
+		{name: "boxes", logits: []float32{1, 0}, boxes: []float32{1}, size: image.Pt(1, 1), option: validOptions},
 		{name: "logits", logits: []float32{1, 2, 3}, boxes: make([]float32, 8), size: image.Pt(1, 1), option: validOptions},
-		{name: "size", logits: []float32{1}, boxes: []float32{0, 0, 1, 1}, option: validOptions},
-		{name: "maximum", logits: []float32{1}, boxes: []float32{0, 0, 1, 1}, size: image.Pt(1, 1), option: DetectionOptions{}},
+		{name: "size", logits: []float32{1, 0}, boxes: []float32{0, 0, 1, 1}, option: validOptions},
+		{name: "maximum", logits: []float32{1, 0}, boxes: []float32{0, 0, 1, 1}, size: image.Pt(1, 1), option: DetectionOptions{}},
+		{name: "missing no object", logits: []float32{1}, boxes: []float32{0, 0, 1, 1}, size: image.Pt(1, 1), option: validOptions},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

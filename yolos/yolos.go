@@ -34,6 +34,7 @@ type DetectOptions struct {
 	MinScore      float32
 	IoUThreshold  float32
 	MaxDetections int
+	ApplyNMS      bool
 }
 
 // Model is a YOLOS transformer object detector.
@@ -144,9 +145,6 @@ func (m *Model) Detect(ctx context.Context, source image.Image, options DetectOp
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if options.IoUThreshold == 0 {
-		options.IoUThreshold = 0.45
-	}
 	if options.MaxDetections == 0 {
 		options.MaxDetections = 100
 	}
@@ -184,6 +182,7 @@ func (m *Model) Detect(ctx context.Context, source image.Image, options DetectOp
 		MaxDetections: options.MaxDetections,
 		MinScore:      options.MinScore,
 		IoUThreshold:  options.IoUThreshold,
+		ApplyNMS:      options.ApplyNMS,
 	})
 }
 

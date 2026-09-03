@@ -20,16 +20,27 @@ const (
 	ResizeShortestEdge
 )
 
+// Interpolation controls the resampling filter used while resizing.
+type Interpolation int
+
+// Supported resize interpolation filters.
+const (
+	InterpolationBilinear Interpolation = iota
+	InterpolationBicubic
+	InterpolationNearest
+)
+
 // Options configures image resizing and channel normalization.
 type Options struct {
-	Width      int
-	Height     int
-	ShortEdge  int
-	LongEdge   int
-	Mode       ResizeMode
-	Mean       [3]float32
-	StdDev     [3]float32
-	CenterCrop bool
+	Width         int
+	Height        int
+	ShortEdge     int
+	LongEdge      int
+	Mode          ResizeMode
+	Interpolation Interpolation
+	Mean          [3]float32
+	StdDev        [3]float32
+	CenterCrop    bool
 }
 
 // Image is normalized RGB image data in NCHW channel order.
@@ -62,7 +73,7 @@ func Process(source image.Image, options Options) (Image, error) {
 		return Image{}, errors.New("vision: resized image dimensions overflow addressable memory")
 	}
 	resized := image.NewRGBA(image.Rect(0, 0, width, height))
-	draw.BiLinear.Scale(resized, resized.Bounds(), source, source.Bounds(), draw.Src, nil)
+	scaler(options.Interpolation).Scale(resized, resized.Bounds(), source, source.Bounds(), draw.Src, nil)
 
 	processed := resized
 	if options.CenterCrop {
@@ -93,6 +104,9 @@ func validateOptions(options Options) error {
 	default:
 		return fmt.Errorf("vision: unsupported resize mode %d", options.Mode)
 	}
+	if options.Interpolation < InterpolationBilinear || options.Interpolation > InterpolationNearest {
+		return fmt.Errorf("vision: unsupported interpolation %d", options.Interpolation)
+	}
 	if options.CenterCrop && (options.Width < 1 || options.Height < 1) {
 		return errors.New("vision: crop width and height must be positive")
 	}
@@ -107,6 +121,19 @@ func validateOptions(options Options) error {
 		}
 	}
 	return nil
+}
+
+func scaler(interpolation Interpolation) draw.Scaler {
+	switch interpolation {
+	case InterpolationBilinear:
+		return draw.BiLinear
+	case InterpolationBicubic:
+		return draw.CatmullRom
+	case InterpolationNearest:
+		return draw.NearestNeighbor
+	default:
+		panic("vision: unreachable interpolation")
+	}
 }
 
 func dimensions(width, height int, options Options) (int, int) {
