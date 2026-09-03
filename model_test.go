@@ -36,3 +36,37 @@ func TestElementTypeSupportsModernONNXTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateModelInfo(t *testing.T) {
+	t.Parallel()
+	valid := ModelInfo{
+		Inputs:  []ValueInfo{{Name: "input", Kind: ValueKindTensor, Shape: []int64{-1, 3}, Type: DataTypeFloat32}},
+		Outputs: []ValueInfo{{Name: "output", Kind: ValueKindTensor, Shape: []int64{-1}, Type: DataTypeInt64}},
+	}
+	if err := validateModelInfo(valid); err != nil {
+		t.Fatal(err)
+	}
+	invalid := valid
+	invalid.Outputs = []ValueInfo{{Name: "output", Kind: ValueKindSequence, Type: DataTypeFloat32}}
+	if err := validateModelInfo(invalid); err == nil {
+		t.Fatal("validateModelInfo(sequence) error = nil")
+	}
+	invalid.Outputs = []ValueInfo{{Name: "output", Kind: ValueKindTensor, Type: DataTypeFloat16}}
+	if err := validateModelInfo(invalid); err == nil {
+		t.Fatal("validateModelInfo(float16) error = nil")
+	}
+}
+
+func TestValidateTensorAgainstSchema(t *testing.T) {
+	t.Parallel()
+	info := ValueInfo{Name: "input", Kind: ValueKindTensor, Shape: []int64{-1, 3}, Type: DataTypeFloat32}
+	if err := validateTensor(MustTensor([]int64{2, 3}, make([]float32, 6)), info); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTensor(MustTensor([]int64{2, 4}, make([]float32, 8)), info); err == nil {
+		t.Fatal("validateTensor(shape) error = nil")
+	}
+	if err := validateTensor(MustTensor([]int64{2, 3}, make([]int64, 6)), info); err == nil {
+		t.Fatal("validateTensor(type) error = nil")
+	}
+}

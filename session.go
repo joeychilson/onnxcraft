@@ -77,6 +77,8 @@ type Session struct {
 	release     func() error
 	inputNames  []string
 	outputNames []string
+	inputInfo   []ValueInfo
+	outputInfo  []ValueInfo
 	serialize   bool
 	closeDone   chan struct{}
 	closeErr    error
@@ -364,6 +366,27 @@ func (r *Runtime) NewSession(
 	return session, nil
 }
 
+// NewSessionFromInfo loads modelPath using a previously inspected graph
+// schema. Inputs and outputs are validated on each run.
+func (r *Runtime) NewSessionFromInfo(
+	modelPath string,
+	info ModelInfo,
+	options ...SessionOption,
+) (*Session, error) {
+	if err := validateModelInfo(info); err != nil {
+		return nil, err
+	}
+	session, err := r.NewSession(modelPath, valueNames(info.Inputs), valueNames(info.Outputs), options...)
+	if err != nil {
+		return nil, err
+	}
+	session.mu.Lock()
+	session.inputInfo = cloneValueInfo(info.Inputs)
+	session.outputInfo = cloneValueInfo(info.Outputs)
+	session.mu.Unlock()
+	return session, nil
+}
+
 // InputNames returns the model inputs in the positional order expected by Run.
 func (s *Session) InputNames() []string {
 	if s == nil {
@@ -382,6 +405,28 @@ func (s *Session) OutputNames() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return slices.Clone(s.outputNames)
+}
+
+// Inputs returns the schema used to validate inputs. Sessions constructed with
+// NewSession return nil because only names were supplied.
+func (s *Session) Inputs() []ValueInfo {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneValueInfo(s.inputInfo)
+}
+
+// Outputs returns the schema used to validate outputs. Sessions constructed
+// with NewSession return nil because only names were supplied.
+func (s *Session) Outputs() []ValueInfo {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneValueInfo(s.outputInfo)
 }
 
 // Run executes the model with positional input tensors. Returned tensors own
@@ -406,6 +451,8 @@ func (s *Session) Run(ctx context.Context, inputs ...Tensor) (result []Tensor, r
 	raw := s.raw
 	inputNames := s.inputNames
 	outputNames := s.outputNames
+	inputInfo := s.inputInfo
+	outputInfo := s.outputInfo
 	s.mu.RUnlock()
 	defer s.active.Done()
 	if s.serialize {
@@ -415,6 +462,13 @@ func (s *Session) Run(ctx context.Context, inputs ...Tensor) (result []Tensor, r
 
 	if len(inputs) != len(inputNames) {
 		return nil, fmt.Errorf("infergo: got %d input tensors, want %d", len(inputs), len(inputNames))
+	}
+	for index, input := range inputs {
+		if len(inputInfo) > 0 {
+			if err := validateTensor(input, inputInfo[index]); err != nil {
+				return nil, fmt.Errorf("infergo: invalid input %q: %w", inputNames[index], err)
+			}
+		}
 	}
 
 	inputValues := make([]ort.Value, len(inputs))
@@ -447,6 +501,11 @@ func (s *Session) Run(ctx context.Context, inputs ...Tensor) (result []Tensor, r
 			return nil, fmt.Errorf("infergo: read output %q: %w", outputNames[index], err)
 		}
 		outputs[index] = output
+		if len(outputInfo) > 0 {
+			if err := validateTensor(output, outputInfo[index]); err != nil {
+				return nil, fmt.Errorf("infergo: invalid output %q: %w", outputNames[index], err)
+			}
+		}
 	}
 	return outputs, nil
 }
@@ -744,6 +803,22 @@ func validateNames(kind string, names []string) error {
 			return fmt.Errorf("infergo: duplicate %s name %q", kind, name)
 		}
 		seen[name] = struct{}{}
+	}
+	return nil
+}
+
+func validateTensor(tensor Tensor, expected ValueInfo) error {
+	if tensor.Type() != expected.Type {
+		return fmt.Errorf("type is %s, want %s", tensor.Type(), expected.Type)
+	}
+	shape := tensor.shape
+	if len(shape) != len(expected.Shape) {
+		return fmt.Errorf("rank is %d, want %d", len(shape), len(expected.Shape))
+	}
+	for index, dimension := range expected.Shape {
+		if dimension >= 0 && shape[index] != dimension {
+			return fmt.Errorf("dimension %d is %d, want %d", index, shape[index], dimension)
+		}
 	}
 	return nil
 }

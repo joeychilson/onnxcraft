@@ -85,7 +85,55 @@ func (r *Runtime) Load(modelPath string, options ...SessionOption) (*Session, er
 	if err != nil {
 		return nil, err
 	}
-	return r.NewSession(modelPath, valueNames(info.Inputs), valueNames(info.Outputs), options...)
+	return r.NewSessionFromInfo(modelPath, info, options...)
+}
+
+func validateModelInfo(info ModelInfo) error {
+	if err := validateValueInfo("input", info.Inputs); err != nil {
+		return err
+	}
+	return validateValueInfo("output", info.Outputs)
+}
+
+func validateValueInfo(kind string, values []ValueInfo) error {
+	if err := validateNames(kind, valueNames(values)); err != nil {
+		return err
+	}
+	for _, value := range values {
+		if value.Kind != ValueKindTensor {
+			return fmt.Errorf("infergo: %s %q has unsupported ONNX kind %s", kind, value.Name, value.Kind)
+		}
+		if !supportedTensorType(value.Type) {
+			return fmt.Errorf("infergo: %s %q has unsupported tensor type %s", kind, value.Name, value.Type)
+		}
+	}
+	return nil
+}
+
+func supportedTensorType(dataType DataType) bool {
+	switch dataType {
+	case DataTypeBool, DataTypeString, DataTypeFloat32, DataTypeFloat64,
+		DataTypeInt8, DataTypeInt16, DataTypeInt32, DataTypeInt64,
+		DataTypeUint8, DataTypeUint16, DataTypeUint32, DataTypeUint64:
+		return true
+	case DataTypeUndefined, DataTypeFloat16, DataTypeBFloat16,
+		DataTypeComplex64, DataTypeComplex128, DataTypeFloat8E4M3FN,
+		DataTypeFloat8E4M3FNUZ, DataTypeFloat8E5M2, DataTypeFloat8E5M2FNUZ,
+		DataTypeInt4, DataTypeUint4, DataTypeInt2, DataTypeUint2, DataTypeFloat4E2M1,
+		DataTypeFloat8E8M0:
+		return false
+	default:
+		return false
+	}
+}
+
+func cloneValueInfo(source []ValueInfo) []ValueInfo {
+	result := make([]ValueInfo, len(source))
+	for index, info := range source {
+		result[index] = info
+		result[index].Shape = slices.Clone(info.Shape)
+	}
+	return result
 }
 
 func convertValueInfo(source []ort.InputOutputInfo) []ValueInfo {
