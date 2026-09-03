@@ -10,8 +10,17 @@ import (
 
 // Softmax returns normalized probabilities without mutating logits.
 func Softmax(logits []float32) ([]float32, error) {
+	return SoftmaxInto(make([]float32, len(logits)), logits)
+}
+
+// SoftmaxInto writes normalized probabilities to destination. It returns an
+// error when the slices differ in length or logits cannot be normalized.
+func SoftmaxInto(destination, logits []float32) ([]float32, error) {
 	if len(logits) == 0 {
 		return nil, errors.New("math32: logits cannot be empty")
+	}
+	if len(destination) != len(logits) {
+		return nil, errors.New("math32: softmax destination length does not match logits")
 	}
 	maximum := float32(math.Inf(-1))
 	positiveInfinities := 0
@@ -27,43 +36,91 @@ func Softmax(logits []float32) ([]float32, error) {
 		}
 	}
 	if positiveInfinities > 0 {
-		probabilities := make([]float32, len(logits))
 		probability := 1 / float32(positiveInfinities)
 		for index, logit := range logits {
 			if math.IsInf(float64(logit), 1) {
-				probabilities[index] = probability
+				destination[index] = probability
+			} else {
+				destination[index] = 0
 			}
 		}
-		return probabilities, nil
+		return destination, nil
 	}
 	if math.IsInf(float64(maximum), -1) {
 		return nil, errors.New("math32: all logits are negative infinity")
 	}
 
-	probabilities := make([]float32, len(logits))
 	var sum float64
 	for index, logit := range logits {
 		value := math.Exp(float64(logit - maximum))
-		probabilities[index] = float32(value)
+		destination[index] = float32(value)
 		sum += value
 	}
-	for index := range probabilities {
-		probabilities[index] = float32(float64(probabilities[index]) / sum)
+	for index := range destination {
+		destination[index] = float32(float64(destination[index]) / sum)
 	}
-	return probabilities, nil
+	return destination, nil
 }
 
 // TopK returns the indices of the largest values in descending, stable order.
 func TopK(values []float32, count int) []int {
 	count = min(max(count, 0), len(values))
-	indices := make([]int, len(values))
-	for index := range indices {
-		indices[index] = index
+	if count == 0 {
+		return []int{}
 	}
-	slices.SortStableFunc(indices, func(left, right int) int {
-		return cmp.Compare(values[right], values[left])
+	indices := make([]int, 0, count)
+	for index := range values {
+		if len(indices) < count {
+			indices = append(indices, index)
+			siftTopKWorstUp(indices, values, len(indices)-1)
+			continue
+		}
+		if topKBetter(values, index, indices[0]) {
+			indices[0] = index
+			siftTopKWorstDown(indices, values, 0)
+		}
+	}
+	slices.SortFunc(indices, func(left, right int) int {
+		if order := cmp.Compare(values[right], values[left]); order != 0 {
+			return order
+		}
+		return cmp.Compare(left, right)
 	})
-	return slices.Clone(indices[:count])
+	return indices
+}
+
+func topKBetter(values []float32, left, right int) bool {
+	return values[left] > values[right] || values[left] == values[right] && left < right
+}
+
+func siftTopKWorstUp(heap []int, values []float32, index int) {
+	for index > 0 {
+		parent := (index - 1) / 2
+		if !topKBetter(values, heap[parent], heap[index]) {
+			return
+		}
+		heap[parent], heap[index] = heap[index], heap[parent]
+		index = parent
+	}
+}
+
+func siftTopKWorstDown(heap []int, values []float32, index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(heap) {
+			return
+		}
+		worst := left
+		right := left + 1
+		if right < len(heap) && topKBetter(values, heap[left], heap[right]) {
+			worst = right
+		}
+		if !topKBetter(values, heap[index], heap[worst]) {
+			return
+		}
+		heap[index], heap[worst] = heap[worst], heap[index]
+		index = worst
+	}
 }
 
 // IntersectionOverUnion computes IoU for two x1, y1, x2, y2 boxes.

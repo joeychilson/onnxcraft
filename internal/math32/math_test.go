@@ -42,6 +42,21 @@ func TestSoftmaxHandlesInfinities(t *testing.T) {
 	}
 }
 
+func TestSoftmaxIntoReusesDestination(t *testing.T) {
+	t.Parallel()
+	destination := make([]float32, 2)
+	got, err := SoftmaxInto(destination, []float32{0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []float32{0.5, 0.5}) || &got[0] != &destination[0] {
+		t.Fatalf("SoftmaxInto() = %v", got)
+	}
+	if _, err := SoftmaxInto(nil, []float32{0}); err == nil {
+		t.Fatal("SoftmaxInto() length error = nil")
+	}
+}
+
 func TestTopKIsStableAndBounded(t *testing.T) {
 	t.Parallel()
 	if got := TopK([]float32{3, 3, 1}, 8); !slices.Equal(got, []int{0, 1, 2}) {
@@ -49,6 +64,9 @@ func TestTopKIsStableAndBounded(t *testing.T) {
 	}
 	if got := TopK([]float32{1}, -1); len(got) != 0 {
 		t.Fatalf("TopK(-1) = %v", got)
+	}
+	if got := TopK([]float32{1, 4, 2, 4, 3}, 2); !slices.Equal(got, []int{1, 3}) {
+		t.Fatalf("TopK() = %v", got)
 	}
 }
 

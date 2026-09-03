@@ -183,9 +183,13 @@ func (m *Model) ClassifyBatch(
 		return nil, errors.New("resnet: MinScore must be between 0 and 1")
 	}
 	pixelsPerImage := 3 * m.config.width * m.config.height
-	pixels := make([]float32, 0, len(sources)*pixelsPerImage)
+	if len(sources) > math.MaxInt/pixelsPerImage {
+		return nil, errors.New("resnet: image batch is too large")
+	}
+	pixels := make([]float32, len(sources)*pixelsPerImage)
 	for index, source := range sources {
-		processed, err := vision.Process(source, vision.Options{
+		start := index * pixelsPerImage
+		_, err := vision.ProcessInto(source, vision.Options{
 			Width:         m.config.width,
 			Height:        m.config.height,
 			ShortEdge:     m.config.resizeEdge,
@@ -195,13 +199,12 @@ func (m *Model) ClassifyBatch(
 			Mean:          m.config.mean,
 			StdDev:        m.config.deviation,
 			CenterCrop:    true,
-		})
+		}, pixels[start:start+pixelsPerImage])
 		if err != nil {
 			return nil, fmt.Errorf("resnet: preprocess image %d: %w", index, err)
 		}
-		pixels = append(pixels, processed.Pixels...)
 	}
-	input, err := infergo.NewTensor(
+	input, err := infergo.TakeTensor(
 		[]int64{int64(len(sources)), 3, int64(m.config.height), int64(m.config.width)},
 		pixels,
 	)

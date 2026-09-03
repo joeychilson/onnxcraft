@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 
 	"github.com/joeychilson/infergo/internal/math32"
@@ -50,15 +49,16 @@ func Classify(logits []float32, options ClassificationOptions) ([]Classification
 		}
 	}
 
-	scores := slices.Clone(logits)
+	scores := make([]float32, len(logits))
 	if options.Softmax {
 		var err error
-		scores, err = math32.Softmax(logits)
+		scores, err = math32.SoftmaxInto(scores, logits)
 		if err != nil {
 			return nil, fmt.Errorf("postprocess: calculate softmax: %w", err)
 		}
 	}
 	if options.Sigmoid {
+		copy(scores, logits)
 		for index, score := range scores {
 			if score >= 0 {
 				scores[index] = 1 / (1 + float32(math.Exp(float64(-score))))
@@ -67,6 +67,9 @@ func Classify(logits []float32, options ClassificationOptions) ([]Classification
 			exponential := float32(math.Exp(float64(score)))
 			scores[index] = exponential / (1 + exponential)
 		}
+	}
+	if !options.Softmax && !options.Sigmoid {
+		copy(scores, logits)
 	}
 	indices := math32.TopK(scores, options.TopK)
 	classifications := make([]Classification, 0, len(indices))

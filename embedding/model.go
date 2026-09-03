@@ -254,18 +254,18 @@ func (m *Model) embedBatch(ctx context.Context, texts []string, maxLength int) (
 		return nil, err
 	}
 	shape := []int64{int64(encoding.BatchSize), int64(encoding.SequenceLength)}
-	inputIDs, err := infergo.NewTensor(shape, encoding.IDs)
+	inputIDs, err := infergo.TakeTensor(shape, encoding.IDs)
 	if err != nil {
 		return nil, err
 	}
-	attentionMask, err := infergo.NewTensor(shape, encoding.AttentionMask)
+	attentionMask, err := infergo.TakeTensor(shape, encoding.AttentionMask)
 	if err != nil {
 		return nil, err
 	}
 	inputs := []infergo.Tensor{inputIDs, attentionMask}
 	if m.usesTokenTypeIDs {
 		tokenTypes := make([]int64, encoding.BatchSize*encoding.SequenceLength)
-		tokenTypeIDs, tensorErr := infergo.NewTensor(shape, tokenTypes)
+		tokenTypeIDs, tensorErr := infergo.TakeTensor(shape, tokenTypes)
 		if tensorErr != nil {
 			return nil, tensorErr
 		}

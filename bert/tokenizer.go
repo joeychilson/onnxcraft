@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"slices"
 	"strings"
@@ -256,21 +257,28 @@ func (t *Tokenizer) EncodeBatch(texts []string, maxLength int) (BatchEncoding, e
 		rows[index] = encoding
 		sequenceLength = max(sequenceLength, len(encoding.IDs))
 	}
+	if sequenceLength > 0 && len(texts) > math.MaxInt/sequenceLength {
+		return BatchEncoding{}, errors.New("bert: encoded batch is too large")
+	}
 	result := BatchEncoding{
-		IDs:            make([]int64, 0, len(texts)*sequenceLength),
-		AttentionMask:  make([]int64, 0, len(texts)*sequenceLength),
+		IDs:            make([]int64, len(texts)*sequenceLength),
+		AttentionMask:  make([]int64, len(texts)*sequenceLength),
 		Tokens:         make([][]string, len(texts)),
 		BatchSize:      len(texts),
 		SequenceLength: sequenceLength,
 	}
+	paddingID := int64(t.vocabulary[t.special.Padding])
 	for index, row := range rows {
-		padded, err := t.Pad(row, sequenceLength)
-		if err != nil {
-			return BatchEncoding{}, fmt.Errorf("bert: pad batch item %d: %w", index, err)
+		start := index * sequenceLength
+		copy(result.IDs[start:], row.IDs)
+		copy(result.AttentionMask[start:], row.AttentionMask)
+		tokens := make([]string, sequenceLength)
+		copy(tokens, row.Tokens)
+		for offset := len(row.IDs); offset < sequenceLength; offset++ {
+			result.IDs[start+offset] = paddingID
+			tokens[offset] = t.special.Padding
 		}
-		result.IDs = append(result.IDs, padded.IDs...)
-		result.AttentionMask = append(result.AttentionMask, padded.AttentionMask...)
-		result.Tokens[index] = padded.Tokens
+		result.Tokens[index] = tokens
 	}
 	return result, nil
 }

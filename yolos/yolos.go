@@ -158,7 +158,7 @@ func (m *Model) Detect(ctx context.Context, source image.Image, options DetectOp
 	if err != nil {
 		return nil, fmt.Errorf("yolos: preprocess image: %w", err)
 	}
-	input, err := infergo.NewTensor(
+	input, err := infergo.TakeTensor(
 		[]int64{1, 3, int64(processed.Height), int64(processed.Width)},
 		processed.Pixels,
 	)

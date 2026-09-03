@@ -54,6 +54,12 @@ type Image struct {
 // Process resizes an image and converts it to a normalized RGB tensor in
 // NCHW channel order.
 func Process(source image.Image, options Options) (Image, error) {
+	return ProcessInto(source, options, nil)
+}
+
+// ProcessInto is like Process but reuses destination when it has enough
+// capacity. The returned Image reports the slice that was actually used.
+func ProcessInto(source image.Image, options Options, destination []float32) (Image, error) {
 	if source == nil {
 		return Image{}, errors.New("vision: image cannot be nil")
 	}
@@ -61,7 +67,7 @@ func Process(source image.Image, options Options) (Image, error) {
 		return Image{}, err
 	}
 	originalSize := image.Pt(source.Bounds().Dx(), source.Bounds().Dy())
-	if originalSize.X == 0 || originalSize.Y == 0 {
+	if originalSize.X < 1 || originalSize.Y < 1 {
 		return Image{}, errors.New("vision: image dimensions must be positive")
 	}
 
@@ -84,7 +90,7 @@ func Process(source image.Image, options Options) (Image, error) {
 	}
 
 	return Image{
-		Pixels:       normalizedNCHW(processed, options.Mean, options.StdDev),
+		Pixels:       normalizedNCHW(processed, options.Mean, options.StdDev, destination),
 		Width:        processed.Bounds().Dx(),
 		Height:       processed.Bounds().Dy(),
 		OriginalSize: originalSize,
@@ -166,28 +172,33 @@ func scaled(width, height int, scale float64) (int, int) {
 func centerCrop(source *image.RGBA, width, height int) *image.RGBA {
 	x := (source.Bounds().Dx() - width) / 2
 	y := (source.Bounds().Dy() - height) / 2
-	destination := image.NewRGBA(image.Rect(0, 0, width, height))
-	draw.Draw(destination, destination.Bounds(), source, image.Pt(x, y), draw.Src)
-	return destination
+	minimum := source.Bounds().Min.Add(image.Pt(x, y))
+	return source.SubImage(image.Rectangle{Min: minimum, Max: minimum.Add(image.Pt(width, height))}).(*image.RGBA)
 }
 
-func normalizedNCHW(source image.Image, mean, deviation [3]float32) []float32 {
+func normalizedNCHW(source *image.RGBA, mean, deviation [3]float32, destination []float32) []float32 {
 	bounds := source.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 	planeSize := width * height
-	pixels := make([]float32, 3*planeSize)
+	required := 3 * planeSize
+	var pixels []float32
+	if cap(destination) >= required {
+		pixels = destination[:required]
+	} else {
+		pixels = make([]float32, required)
+	}
 	for y := range height {
 		for x := range width {
-			red, green, blue, _ := source.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
+			offset := source.PixOffset(bounds.Min.X+x, bounds.Min.Y+y)
 			position := y*width + x
-			pixels[position] = normalize(red, mean[0], deviation[0])
-			pixels[planeSize+position] = normalize(green, mean[1], deviation[1])
-			pixels[2*planeSize+position] = normalize(blue, mean[2], deviation[2])
+			pixels[position] = normalize(source.Pix[offset], mean[0], deviation[0])
+			pixels[planeSize+position] = normalize(source.Pix[offset+1], mean[1], deviation[1])
+			pixels[2*planeSize+position] = normalize(source.Pix[offset+2], mean[2], deviation[2])
 		}
 	}
 	return pixels
 }
 
-func normalize(value uint32, mean, deviation float32) float32 {
-	return (float32(value)/65535 - mean) / deviation
+func normalize(value uint8, mean, deviation float32) float32 {
+	return (float32(value)/255 - mean) / deviation
 }

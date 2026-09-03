@@ -202,17 +202,17 @@ func (m *Model) FillMask(ctx context.Context, text string, options FillMaskOptio
 	}
 
 	shape := []int64{1, int64(len(encoding.IDs))}
-	inputIDs, err := infergo.NewTensor(shape, encoding.IDs)
+	inputIDs, err := infergo.TakeTensor(shape, encoding.IDs)
 	if err != nil {
 		return nil, err
 	}
-	attentionMask, err := infergo.NewTensor(shape, encoding.AttentionMask)
+	attentionMask, err := infergo.TakeTensor(shape, encoding.AttentionMask)
 	if err != nil {
 		return nil, err
 	}
 	inputs := []infergo.Tensor{inputIDs, attentionMask}
 	if m.usesTokenTypeIDs {
-		tokenTypeIDs, tensorErr := infergo.NewTensor(shape, make([]int64, len(encoding.IDs)))
+		tokenTypeIDs, tensorErr := infergo.TakeTensor(shape, make([]int64, len(encoding.IDs)))
 		if tensorErr != nil {
 			return nil, tensorErr
 		}

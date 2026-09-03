@@ -106,3 +106,18 @@ func TestProcessSupportsInterpolationFilters(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessIntoReusesDestination(t *testing.T) {
+	t.Parallel()
+	source := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	destination := make([]float32, 12)
+	got, err := ProcessInto(source, Options{
+		Width: 2, Height: 2, Mode: ResizeStretch, StdDev: [3]float32{1, 1, 1},
+	}, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &got.Pixels[0] != &destination[0] {
+		t.Fatal("ProcessInto() did not reuse destination")
+	}
+}
