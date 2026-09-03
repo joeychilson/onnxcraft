@@ -189,9 +189,9 @@ func (m *Model) FillMask(ctx context.Context, text string, options FillMaskOptio
 	var encoding Encoding
 	var err error
 	if options.PadToMaxLength {
-		encoding, err = m.tokenizer.EncodePadded(text, options.MaxLength)
+		encoding, err = m.tokenizer.EncodePaddedContext(ctx, text, options.MaxLength)
 	} else {
-		encoding, err = m.tokenizer.Encode(text, options.MaxLength)
+		encoding, err = m.tokenizer.EncodeContext(ctx, text, options.MaxLength)
 	}
 	if err != nil {
 		return nil, err
@@ -234,6 +234,9 @@ func (m *Model) FillMask(ctx context.Context, text string, options FillMaskOptio
 
 	results := make([]MaskPrediction, 0, len(positions))
 	for _, position := range positions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		start := position * vocabularySize
 		predictions, err := postprocess.Classify(logits[start:start+vocabularySize], postprocess.ClassificationOptions{
 			Labels:   m.labels,

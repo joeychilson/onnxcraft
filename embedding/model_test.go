@@ -19,7 +19,7 @@ func TestMeanPoolingIgnoresPadding(t *testing.T) {
 		1, 2, 3, 4, 100, 200,
 		5, 6, 100, 200, 300, 400,
 	}
-	result, err := pool(values, []int64{2, 3, 2}, encoding, PoolingMean)
+	result, err := pool(t.Context(), values, []int64{2, 3, 2}, encoding, PoolingMean)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestMeanPoolingIgnoresPadding(t *testing.T) {
 func TestCLSPooling(t *testing.T) {
 	t.Parallel()
 	encoding := bert.BatchEncoding{AttentionMask: []int64{1, 1}, BatchSize: 1, SequenceLength: 2}
-	result, err := pool([]float32{1, 2, 3, 4}, []int64{1, 2, 2}, encoding, PoolingCLS)
+	result, err := pool(t.Context(), []float32{1, 2, 3, 4}, []int64{1, 2, 2}, encoding, PoolingCLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestCLSPooling(t *testing.T) {
 func TestSentenceEmbeddingOutputSkipsPooling(t *testing.T) {
 	t.Parallel()
 	encoding := bert.BatchEncoding{BatchSize: 2, SequenceLength: 3}
-	result, err := pool([]float32{1, 2, 3, 4}, []int64{2, 2}, encoding, PoolingMean)
+	result, err := pool(t.Context(), []float32{1, 2, 3, 4}, []int64{2, 2}, encoding, PoolingMean)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -196,6 +196,9 @@ func (m *Model) Embed(ctx context.Context, texts []string, options EmbedOptions)
 
 	result := make([][]float32, 0, len(texts))
 	for start := 0; start < len(texts); start += options.BatchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		end := min(start+options.BatchSize, len(texts))
 		batch, err := m.embedBatch(ctx, texts[start:end], options.MaxLength)
 		if err != nil {
@@ -249,7 +252,7 @@ func CosineSimilarity(left, right []float32) (float32, error) {
 }
 
 func (m *Model) embedBatch(ctx context.Context, texts []string, maxLength int) ([][]float32, error) {
-	encoding, err := m.tokenizer.EncodeBatch(texts, maxLength)
+	encoding, err := m.tokenizer.EncodeBatchContext(ctx, texts, maxLength)
 	if err != nil {
 		return nil, err
 	}
@@ -279,12 +282,15 @@ func (m *Model) embedBatch(ctx context.Context, texts []string, maxLength int) (
 	if err != nil {
 		return nil, fmt.Errorf("read embeddings: %w", err)
 	}
-	vectors, err := pool(values, outputs[0].Shape(), encoding, m.pooling)
+	vectors, err := pool(ctx, values, outputs[0].Shape(), encoding, m.pooling)
 	if err != nil {
 		return nil, err
 	}
 	if m.normalize {
 		for index := range vectors {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if err := normalize(vectors[index]); err != nil {
 				return nil, fmt.Errorf("normalize embedding %d: %w", index, err)
 			}
@@ -293,7 +299,13 @@ func (m *Model) embedBatch(ctx context.Context, texts []string, maxLength int) (
 	return vectors, nil
 }
 
-func pool(values []float32, shape []int64, encoding bert.BatchEncoding, pooling Pooling) ([][]float32, error) {
+func pool(
+	ctx context.Context,
+	values []float32,
+	shape []int64,
+	encoding bert.BatchEncoding,
+	pooling Pooling,
+) ([][]float32, error) {
 	if len(shape) == 2 {
 		if shape[0] != int64(encoding.BatchSize) || shape[1] < 1 || len(values) != int(shape[0]*shape[1]) {
 			return nil, fmt.Errorf("embedding: model returned invalid sentence embedding shape %v", shape)
@@ -301,6 +313,9 @@ func pool(values []float32, shape []int64, encoding bert.BatchEncoding, pooling 
 		hiddenSize := int(shape[1])
 		result := make([][]float32, encoding.BatchSize)
 		for batchIndex := range result {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			start := batchIndex * hiddenSize
 			result[batchIndex] = slices.Clone(values[start : start+hiddenSize])
 		}
@@ -314,6 +329,9 @@ func pool(values []float32, shape []int64, encoding bert.BatchEncoding, pooling 
 	hiddenSize := int(shape[2])
 	result := make([][]float32, encoding.BatchSize)
 	for batchIndex := range result {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		vector := make([]float32, hiddenSize)
 		if pooling == PoolingCLS {
 			start := batchIndex * encoding.SequenceLength * hiddenSize

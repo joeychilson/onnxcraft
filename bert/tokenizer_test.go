@@ -1,10 +1,28 @@
 package bert
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestTokenizerContextCancellation(t *testing.T) {
+	t.Parallel()
+	tokenizer, err := NewTokenizer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := tokenizer.EncodeContext(ctx, "hello", 8); !errors.Is(err, context.Canceled) {
+		t.Fatalf("EncodeContext() error = %v, want context.Canceled", err)
+	}
+	if _, err := tokenizer.EncodeBatchContext(ctx, []string{"hello"}, 8); !errors.Is(err, context.Canceled) {
+		t.Fatalf("EncodeBatchContext() error = %v, want context.Canceled", err)
+	}
+}
 
 func TestTokenizerEncodesUnicodeAndSpecialTokens(t *testing.T) {
 	t.Parallel()

@@ -116,7 +116,7 @@ func (m *Classifier) ClassifyBatch(
 		return nil, err
 	}
 
-	encoding, err := m.tokenizer.EncodeBatch(texts, options.MaxLength)
+	encoding, err := m.tokenizer.EncodeBatchContext(ctx, texts, options.MaxLength)
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +152,9 @@ func (m *Classifier) ClassifyBatch(
 	}
 	results := make([][]postprocess.Classification, encoding.BatchSize)
 	for batchIndex := range results {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		start := batchIndex * classCount
 		results[batchIndex], err = postprocess.Classify(logits[start:start+classCount], postprocess.ClassificationOptions{
 			Labels:   m.labels,

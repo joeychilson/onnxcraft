@@ -3,6 +3,7 @@ package bert
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"embed"
 	"errors"
 	"fmt"
@@ -216,8 +217,19 @@ func NewTokenizerFromReader(reader io.Reader, options ...TokenizerOption) (*Toke
 // Encode tokenizes text, adds classifier and separator tokens, and truncates
 // to maxLength while always preserving the final separator.
 func (t *Tokenizer) Encode(text string, maxLength int) (Encoding, error) {
+	return t.EncodeContext(context.Background(), text, maxLength)
+}
+
+// EncodeContext is like Encode and stops tokenization when ctx is canceled.
+func (t *Tokenizer) EncodeContext(ctx context.Context, text string, maxLength int) (Encoding, error) {
 	if t == nil {
 		return Encoding{}, errors.New("bert: nil tokenizer")
+	}
+	if ctx == nil {
+		return Encoding{}, errors.New("bert: context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return Encoding{}, err
 	}
 	if maxLength < 2 {
 		return Encoding{}, errors.New("bert: maximum length must be at least two")
@@ -225,8 +237,17 @@ func (t *Tokenizer) Encode(text string, maxLength int) (Encoding, error) {
 	if maxLength > maxSequenceLength {
 		return Encoding{}, fmt.Errorf("bert: maximum length exceeds %d", maxSequenceLength)
 	}
+	basicTokens, err := t.basicTokens(ctx, text)
+	if err != nil {
+		return Encoding{}, err
+	}
 	wordPieces := make([]string, 0)
-	for _, token := range t.basicTokens(text) {
+	for index, token := range basicTokens {
+		if index&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return Encoding{}, err
+			}
+		}
 		if special, ok := t.specialMap[strings.ToUpper(token)]; ok {
 			wordPieces = append(wordPieces, special)
 			continue
@@ -256,7 +277,13 @@ func (t *Tokenizer) Encode(text string, maxLength int) (Encoding, error) {
 // EncodePadded is like Encode and appends padding tokens until the encoding
 // reaches maxLength. Padding positions have an attention value of zero.
 func (t *Tokenizer) EncodePadded(text string, maxLength int) (Encoding, error) {
-	encoding, err := t.Encode(text, maxLength)
+	return t.EncodePaddedContext(context.Background(), text, maxLength)
+}
+
+// EncodePaddedContext is like EncodePadded and stops tokenization when ctx is
+// canceled.
+func (t *Tokenizer) EncodePaddedContext(ctx context.Context, text string, maxLength int) (Encoding, error) {
+	encoding, err := t.EncodeContext(ctx, text, maxLength)
 	if err != nil {
 		return Encoding{}, err
 	}
@@ -266,8 +293,20 @@ func (t *Tokenizer) EncodePadded(text string, maxLength int) (Encoding, error) {
 // EncodeBatch tokenizes texts and pads every row to the longest encoded
 // sequence in the batch, up to maxLength.
 func (t *Tokenizer) EncodeBatch(texts []string, maxLength int) (BatchEncoding, error) {
+	return t.EncodeBatchContext(context.Background(), texts, maxLength)
+}
+
+// EncodeBatchContext is like EncodeBatch and stops tokenization when ctx is
+// canceled.
+func (t *Tokenizer) EncodeBatchContext(ctx context.Context, texts []string, maxLength int) (BatchEncoding, error) {
 	if t == nil {
 		return BatchEncoding{}, errors.New("bert: nil tokenizer")
+	}
+	if ctx == nil {
+		return BatchEncoding{}, errors.New("bert: context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return BatchEncoding{}, err
 	}
 	if len(texts) == 0 {
 		return BatchEncoding{}, errors.New("bert: text batch cannot be empty")
@@ -275,7 +314,7 @@ func (t *Tokenizer) EncodeBatch(texts []string, maxLength int) (BatchEncoding, e
 	rows := make([]Encoding, len(texts))
 	sequenceLength := 0
 	for index, text := range texts {
-		encoding, err := t.Encode(text, maxLength)
+		encoding, err := t.EncodeContext(ctx, text, maxLength)
 		if err != nil {
 			return BatchEncoding{}, fmt.Errorf("bert: encode batch item %d: %w", index, err)
 		}
@@ -294,6 +333,11 @@ func (t *Tokenizer) EncodeBatch(texts []string, maxLength int) (BatchEncoding, e
 	}
 	paddingID := int64(t.vocabulary[t.special.Padding])
 	for index, row := range rows {
+		if index&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return BatchEncoding{}, err
+			}
+		}
 		start := index * sequenceLength
 		copy(result.IDs[start:], row.IDs)
 		copy(result.AttentionMask[start:], row.AttentionMask)
@@ -384,7 +428,7 @@ func (t *Tokenizer) labels() map[int]string {
 	return labels
 }
 
-func (t *Tokenizer) basicTokens(text string) []string {
+func (t *Tokenizer) basicTokens(ctx context.Context, text string) ([]string, error) {
 	runes := []rune(text)
 	tokens := make([]string, 0)
 	current := make([]rune, 0)
@@ -397,6 +441,11 @@ func (t *Tokenizer) basicTokens(text string) []string {
 	}
 
 	for index := 0; index < len(runes); index++ {
+		if index&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		character := runes[index]
 		if special, length, ok := t.matchSpecial(runes[index:]); ok {
 			flush()
@@ -417,7 +466,7 @@ func (t *Tokenizer) basicTokens(text string) []string {
 		}
 	}
 	flush()
-	return tokens
+	return tokens, nil
 }
 
 func (t *Tokenizer) matchSpecial(remaining []rune) (string, int, bool) {

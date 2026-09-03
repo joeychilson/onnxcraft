@@ -148,7 +148,7 @@ func (m *Model) Detect(ctx context.Context, source image.Image, options DetectOp
 	if options.MaxDetections == 0 {
 		options.MaxDetections = 100
 	}
-	processed, err := vision.Process(source, vision.Options{
+	processed, err := vision.ProcessContext(ctx, source, vision.Options{
 		ShortEdge: m.config.shortEdge,
 		LongEdge:  m.config.longEdge,
 		Mode:      vision.ResizeShortestEdge,

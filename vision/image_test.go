@@ -1,12 +1,30 @@
 package vision
 
 import (
+	"context"
+	"errors"
 	"image"
 	"image/color"
 	"math"
 	"slices"
 	"testing"
 )
+
+func TestProcessContextCancellation(t *testing.T) {
+	t.Parallel()
+	source := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	options := Options{
+		Width:  1,
+		Height: 1,
+		Mode:   ResizeStretch,
+		StdDev: [3]float32{1, 1, 1},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := ProcessContext(ctx, source, options); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ProcessContext() error = %v, want context.Canceled", err)
+	}
+}
 
 func TestProcessProducesNCHW(t *testing.T) {
 	t.Parallel()

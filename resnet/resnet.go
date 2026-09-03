@@ -189,7 +189,7 @@ func (m *Model) ClassifyBatch(
 	pixels := make([]float32, len(sources)*pixelsPerImage)
 	for index, source := range sources {
 		start := index * pixelsPerImage
-		_, err := vision.ProcessInto(source, vision.Options{
+		_, err := vision.ProcessIntoContext(ctx, source, vision.Options{
 			Width:         m.config.width,
 			Height:        m.config.height,
 			ShortEdge:     m.config.resizeEdge,

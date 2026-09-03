@@ -1,6 +1,7 @@
 package vision
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -54,12 +55,35 @@ type Image struct {
 // Process resizes an image and converts it to a normalized RGB tensor in
 // NCHW channel order.
 func Process(source image.Image, options Options) (Image, error) {
-	return ProcessInto(source, options, nil)
+	return ProcessContext(context.Background(), source, options)
+}
+
+// ProcessContext is like Process and stops preprocessing when ctx is
+// canceled.
+func ProcessContext(ctx context.Context, source image.Image, options Options) (Image, error) {
+	return ProcessIntoContext(ctx, source, options, nil)
 }
 
 // ProcessInto is like Process but reuses destination when it has enough
 // capacity. The returned Image reports the slice that was actually used.
 func ProcessInto(source image.Image, options Options, destination []float32) (Image, error) {
+	return ProcessIntoContext(context.Background(), source, options, destination)
+}
+
+// ProcessIntoContext is like ProcessInto and stops preprocessing when ctx is
+// canceled.
+func ProcessIntoContext(
+	ctx context.Context,
+	source image.Image,
+	options Options,
+	destination []float32,
+) (Image, error) {
+	if ctx == nil {
+		return Image{}, errors.New("vision: context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return Image{}, err
+	}
 	if source == nil {
 		return Image{}, errors.New("vision: image cannot be nil")
 	}
@@ -80,6 +104,9 @@ func ProcessInto(source image.Image, options Options, destination []float32) (Im
 	}
 	resized := image.NewRGBA(image.Rect(0, 0, width, height))
 	scaler(options.Interpolation).Scale(resized, resized.Bounds(), source, source.Bounds(), draw.Src, nil)
+	if err := ctx.Err(); err != nil {
+		return Image{}, err
+	}
 
 	processed := resized
 	if options.CenterCrop {
@@ -89,8 +116,12 @@ func ProcessInto(source image.Image, options Options, destination []float32) (Im
 		processed = centerCrop(resized, options.Width, options.Height)
 	}
 
+	pixels, err := normalizedNCHW(ctx, processed, options.Mean, options.StdDev, destination)
+	if err != nil {
+		return Image{}, err
+	}
 	return Image{
-		Pixels:       normalizedNCHW(processed, options.Mean, options.StdDev, destination),
+		Pixels:       pixels,
 		Width:        processed.Bounds().Dx(),
 		Height:       processed.Bounds().Dy(),
 		OriginalSize: originalSize,
@@ -176,7 +207,12 @@ func centerCrop(source *image.RGBA, width, height int) *image.RGBA {
 	return source.SubImage(image.Rectangle{Min: minimum, Max: minimum.Add(image.Pt(width, height))}).(*image.RGBA)
 }
 
-func normalizedNCHW(source *image.RGBA, mean, deviation [3]float32, destination []float32) []float32 {
+func normalizedNCHW(
+	ctx context.Context,
+	source *image.RGBA,
+	mean, deviation [3]float32,
+	destination []float32,
+) ([]float32, error) {
 	bounds := source.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 	planeSize := width * height
@@ -188,6 +224,11 @@ func normalizedNCHW(source *image.RGBA, mean, deviation [3]float32, destination 
 		pixels = make([]float32, required)
 	}
 	for y := range height {
+		if y&63 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		for x := range width {
 			offset := source.PixOffset(bounds.Min.X+x, bounds.Min.Y+y)
 			position := y*width + x
@@ -196,7 +237,7 @@ func normalizedNCHW(source *image.RGBA, mean, deviation [3]float32, destination 
 			pixels[2*planeSize+position] = normalize(source.Pix[offset+2], mean[2], deviation[2])
 		}
 	}
-	return pixels
+	return pixels, nil
 }
 
 func normalize(value uint8, mean, deviation float32) float32 {
