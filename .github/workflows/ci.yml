@@ -85,6 +85,12 @@ jobs:
         with:
           path: ${{ env.INFERGO_CACHE_DIR }}
           key: onnxruntime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime.go', 'runtime_assets.go') }}
+      - name: Select native Windows ARM64 compiler
+        if: matrix.platform == 'windows-arm64'
+        shell: pwsh
+        run: |
+          clang --version
+          "CC=clang" >> $env:GITHUB_ENV
       - name: Test with native runtime
         env:
           INFERGO_INTEGRATION: "1"
@@ -95,6 +101,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
+      # Go's cgo loader retains process-lifetime bookkeeping that LeakSanitizer
+      # cannot attribute. ASan's bounds and use-after-free checks remain active.
+      ASAN_OPTIONS: detect_leaks=0
       INFERGO_CACHE_DIR: ${{ github.workspace }}/.cache/infergo
       INFERGO_INTEGRATION: "1"
     steps:
