@@ -34,6 +34,18 @@ const (
 	ExecutionParallel
 )
 
+// LoggingLevel controls ONNX Runtime session log verbosity.
+type LoggingLevel int
+
+// Supported session logging levels.
+const (
+	LoggingVerbose LoggingLevel = iota
+	LoggingInfo
+	LoggingWarning
+	LoggingError
+	LoggingFatal
+)
+
 // SessionOption configures a Session.
 type SessionOption func(*sessionConfig) error
 
@@ -44,6 +56,14 @@ type sessionConfig struct {
 	executionMode  ExecutionMode
 	executionSet   bool
 	directML       bool
+	memoryPattern  *bool
+	cpuArena       *bool
+	logging        *LoggingLevel
+	profilePrefix  string
+	optimizedModel string
+	customOps      []string
+	configEntries  map[string]string
+	providerNames  map[string]struct{}
 	providers      []func(*ort.SessionOptions) error
 }
 
@@ -98,6 +118,83 @@ func WithExecutionMode(mode ExecutionMode) SessionOption {
 	}
 }
 
+// WithMemoryPattern controls ONNX Runtime memory-pattern optimization.
+func WithMemoryPattern(enabled bool) SessionOption {
+	return func(config *sessionConfig) error {
+		config.memoryPattern = &enabled
+		return nil
+	}
+}
+
+// WithCPUMemoryArena controls ONNX Runtime's CPU memory arena.
+func WithCPUMemoryArena(enabled bool) SessionOption {
+	return func(config *sessionConfig) error {
+		config.cpuArena = &enabled
+		return nil
+	}
+}
+
+// WithLogging sets the ONNX Runtime session log severity threshold.
+func WithLogging(level LoggingLevel) SessionOption {
+	return func(config *sessionConfig) error {
+		if level < LoggingVerbose || level > LoggingFatal {
+			return fmt.Errorf("infergo: invalid logging level %d", level)
+		}
+		config.logging = &level
+		return nil
+	}
+}
+
+// WithProfiling writes ONNX Runtime profiling output using prefix.
+func WithProfiling(prefix string) SessionOption {
+	return func(config *sessionConfig) error {
+		if prefix == "" {
+			return errors.New("infergo: profiling prefix cannot be empty")
+		}
+		config.profilePrefix = prefix
+		return nil
+	}
+}
+
+// WithOptimizedModel writes the optimized graph to path while loading.
+func WithOptimizedModel(path string) SessionOption {
+	return func(config *sessionConfig) error {
+		if path == "" {
+			return errors.New("infergo: optimized model path cannot be empty")
+		}
+		config.optimizedModel = path
+		return nil
+	}
+}
+
+// WithCustomOperators registers a custom-operator shared library.
+func WithCustomOperators(path string) SessionOption {
+	return func(config *sessionConfig) error {
+		if path == "" {
+			return errors.New("infergo: custom-operator library path cannot be empty")
+		}
+		config.customOps = append(config.customOps, path)
+		return nil
+	}
+}
+
+// WithSessionConfig sets an ONNX Runtime session configuration entry.
+func WithSessionConfig(key, value string) SessionOption {
+	return func(config *sessionConfig) error {
+		if key == "" {
+			return errors.New("infergo: session configuration key cannot be empty")
+		}
+		if config.configEntries == nil {
+			config.configEntries = make(map[string]string)
+		}
+		if _, exists := config.configEntries[key]; exists {
+			return fmt.Errorf("infergo: duplicate session configuration key %q", key)
+		}
+		config.configEntries[key] = value
+		return nil
+	}
+}
+
 // WithOptimization sets the graph optimization level. The default is
 // OptimizationAll.
 func WithOptimization(level OptimizationLevel) SessionOption {
@@ -115,13 +212,12 @@ func WithOptimization(level OptimizationLevel) SessionOption {
 func WithCoreML(settings map[string]string) SessionOption {
 	settings = maps.Clone(settings)
 	return func(config *sessionConfig) error {
-		config.providers = append(config.providers, func(options *ort.SessionOptions) error {
+		return appendProvider(config, "CoreML", func(options *ort.SessionOptions) error {
 			if err := options.AppendExecutionProviderCoreMLV2(settings); err != nil {
 				return fmt.Errorf("infergo: enable Core ML execution provider: %w", err)
 			}
 			return nil
 		})
-		return nil
 	}
 }
 
@@ -131,7 +227,7 @@ func WithCoreML(settings map[string]string) SessionOption {
 func WithCUDA(settings map[string]string) SessionOption {
 	settings = maps.Clone(settings)
 	return func(config *sessionConfig) error {
-		config.providers = append(config.providers, func(options *ort.SessionOptions) error {
+		return appendProvider(config, "CUDA", func(options *ort.SessionOptions) error {
 			providerOptions, err := ort.NewCUDAProviderOptions()
 			if err != nil {
 				return fmt.Errorf("infergo: create CUDA provider options: %w", err)
@@ -146,7 +242,6 @@ func WithCUDA(settings map[string]string) SessionOption {
 			}
 			return destroyErr
 		})
-		return nil
 	}
 }
 
@@ -156,7 +251,7 @@ func WithCUDA(settings map[string]string) SessionOption {
 func WithTensorRT(settings map[string]string) SessionOption {
 	settings = maps.Clone(settings)
 	return func(config *sessionConfig) error {
-		config.providers = append(config.providers, func(options *ort.SessionOptions) error {
+		return appendProvider(config, "TensorRT", func(options *ort.SessionOptions) error {
 			providerOptions, err := ort.NewTensorRTProviderOptions()
 			if err != nil {
 				return fmt.Errorf("infergo: create TensorRT provider options: %w", err)
@@ -171,7 +266,6 @@ func WithTensorRT(settings map[string]string) SessionOption {
 			}
 			return destroyErr
 		})
-		return nil
 	}
 }
 
@@ -180,13 +274,12 @@ func WithTensorRT(settings map[string]string) SessionOption {
 func WithOpenVINO(settings map[string]string) SessionOption {
 	settings = maps.Clone(settings)
 	return func(config *sessionConfig) error {
-		config.providers = append(config.providers, func(options *ort.SessionOptions) error {
+		return appendProvider(config, "OpenVINO", func(options *ort.SessionOptions) error {
 			if err := options.AppendExecutionProviderOpenVINO(settings); err != nil {
 				return fmt.Errorf("infergo: enable OpenVINO execution provider: %w", err)
 			}
 			return nil
 		})
-		return nil
 	}
 }
 
@@ -199,13 +292,12 @@ func WithExecutionProvider(name string, settings map[string]string) SessionOptio
 		if name == "" {
 			return errors.New("infergo: execution provider name cannot be empty")
 		}
-		config.providers = append(config.providers, func(options *ort.SessionOptions) error {
+		return appendProvider(config, name, func(options *ort.SessionOptions) error {
 			if err := options.AppendExecutionProvider(name, settings); err != nil {
 				return fmt.Errorf("infergo: enable %s execution provider: %w", name, err)
 			}
 			return nil
 		})
-		return nil
 	}
 }
 
@@ -217,14 +309,25 @@ func WithDirectML(deviceID int) SessionOption {
 			return errors.New("infergo: DirectML device ID cannot be negative")
 		}
 		config.directML = true
-		config.providers = append(config.providers, func(options *ort.SessionOptions) error {
+		return appendProvider(config, "DirectML", func(options *ort.SessionOptions) error {
 			if err := options.AppendExecutionProviderDirectML(deviceID); err != nil {
 				return fmt.Errorf("infergo: enable DirectML execution provider: %w", err)
 			}
 			return nil
 		})
-		return nil
 	}
+}
+
+func appendProvider(config *sessionConfig, name string, provider func(*ort.SessionOptions) error) error {
+	if config.providerNames == nil {
+		config.providerNames = make(map[string]struct{})
+	}
+	if _, exists := config.providerNames[name]; exists {
+		return fmt.Errorf("infergo: duplicate execution provider %q", name)
+	}
+	config.providerNames[name] = struct{}{}
+	config.providers = append(config.providers, provider)
+	return nil
 }
 
 // NewSession loads modelPath with positional input and output names.
@@ -522,7 +625,12 @@ func resolveSessionConfig(options []SessionOption) (sessionConfig, error) {
 		if config.executionMode == ExecutionParallel {
 			return sessionConfig{}, errors.New("infergo: DirectML requires sequential execution")
 		}
+		if config.memoryPattern != nil && *config.memoryPattern {
+			return sessionConfig{}, errors.New("infergo: DirectML requires memory patterns to be disabled")
+		}
 		config.executionMode = ExecutionSequential
+		disabled := false
+		config.memoryPattern = &disabled
 	}
 	return config, nil
 }
@@ -558,9 +666,47 @@ func newORTSessionOptions(config sessionConfig) (*ort.SessionOptions, error) {
 	if optionErr := options.SetExecutionMode(executionMode); optionErr != nil {
 		return nil, errors.Join(fmt.Errorf("infergo: set execution mode: %w", optionErr), options.Destroy())
 	}
-	if config.directML {
-		if optionErr := options.SetMemPattern(false); optionErr != nil {
-			return nil, errors.Join(fmt.Errorf("infergo: disable memory patterns for DirectML: %w", optionErr), options.Destroy())
+	if config.memoryPattern != nil {
+		if optionErr := options.SetMemPattern(*config.memoryPattern); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: set memory patterns: %w", optionErr), options.Destroy())
+		}
+	}
+	if config.cpuArena != nil {
+		if optionErr := options.SetCpuMemArena(*config.cpuArena); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: set CPU memory arena: %w", optionErr), options.Destroy())
+		}
+	}
+	if config.logging != nil {
+		logging := [...]ort.LoggingLevel{
+			ort.LoggingLevel(ort.LoggingLevelVerbose),
+			ort.LoggingLevel(ort.LoggingLevelInfo),
+			ort.LoggingLevel(ort.LoggingLevelWarning),
+			ort.LoggingLevel(ort.LoggingLevelError),
+			ort.LoggingLevel(ort.LoggingLevelFatal),
+		}[*config.logging]
+		if optionErr := options.SetLogSeverityLevel(logging); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: set logging level: %w", optionErr), options.Destroy())
+		}
+	}
+	if config.optimizedModel != "" {
+		if optionErr := options.SetOptimizedModelFilePath(config.optimizedModel); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: set optimized model path: %w", optionErr), options.Destroy())
+		}
+	}
+	if config.profilePrefix != "" {
+		if optionErr := options.EnableProfiling(config.profilePrefix); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: enable profiling: %w", optionErr), options.Destroy())
+		}
+	}
+	for _, path := range config.customOps {
+		if optionErr := options.RegisterCustomOpsLibrary(path); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: register custom operators %q: %w", path, optionErr), options.Destroy())
+		}
+	}
+	configKeys := slices.Sorted(maps.Keys(config.configEntries))
+	for _, key := range configKeys {
+		if optionErr := options.AddSessionConfigEntry(key, config.configEntries[key]); optionErr != nil {
+			return nil, errors.Join(fmt.Errorf("infergo: set session configuration %q: %w", key, optionErr), options.Destroy())
 		}
 	}
 	for _, configureProvider := range config.providers {

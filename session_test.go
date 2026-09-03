@@ -29,6 +29,27 @@ func TestSessionOptions(t *testing.T) {
 	if err := WithExecutionMode(ExecutionParallel)(&config); err != nil {
 		t.Fatal(err)
 	}
+	if err := WithMemoryPattern(false)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithCPUMemoryArena(false)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithLogging(LoggingWarning)(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithProfiling("profile")(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithOptimizedModel("optimized.onnx")(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithCustomOperators("operators.so")(&config); err != nil {
+		t.Fatal(err)
+	}
+	if err := WithSessionConfig("session.test", "value")(&config); err != nil {
+		t.Fatal(err)
+	}
 	if err := WithCoreML(map[string]string{"ModelFormat": "MLProgram"})(&config); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +68,11 @@ func TestSessionOptions(t *testing.T) {
 	if err := WithDirectML(0)(&config); err != nil {
 		t.Fatal(err)
 	}
-	if config.intraOpThreads != 4 || config.interOpThreads != 2 || config.optimization != OptimizationExtended || config.executionMode != ExecutionParallel || !config.directML || len(config.providers) != 6 {
+	if config.intraOpThreads != 4 || config.interOpThreads != 2 || config.optimization != OptimizationExtended ||
+		config.executionMode != ExecutionParallel || !config.directML || len(config.providers) != 6 ||
+		config.memoryPattern == nil || *config.memoryPattern || config.cpuArena == nil || *config.cpuArena ||
+		config.logging == nil || *config.logging != LoggingWarning || config.profilePrefix != "profile" ||
+		config.optimizedModel != "optimized.onnx" || len(config.customOps) != 1 || config.configEntries["session.test"] != "value" {
 		t.Fatalf("config = %+v", config)
 	}
 	if err := WithIntraOpThreads(0)(&config); err == nil {
@@ -61,6 +86,24 @@ func TestSessionOptions(t *testing.T) {
 	}
 	if err := WithExecutionMode(ExecutionMode(99))(&config); err == nil {
 		t.Fatal("WithExecutionMode(99) error = nil")
+	}
+	if err := WithLogging(LoggingLevel(99))(&config); err == nil {
+		t.Fatal("WithLogging(99) error = nil")
+	}
+	if err := WithProfiling("")(&config); err == nil {
+		t.Fatal("WithProfiling() error = nil")
+	}
+	if err := WithOptimizedModel("")(&config); err == nil {
+		t.Fatal("WithOptimizedModel() error = nil")
+	}
+	if err := WithCustomOperators("")(&config); err == nil {
+		t.Fatal("WithCustomOperators() error = nil")
+	}
+	if err := WithSessionConfig("", "value")(&config); err == nil {
+		t.Fatal("WithSessionConfig() error = nil")
+	}
+	if err := WithSessionConfig("session.test", "other")(&config); err == nil {
+		t.Fatal("duplicate WithSessionConfig() error = nil")
 	}
 	if err := WithDirectML(-1)(&config); err == nil {
 		t.Fatal("WithDirectML(-1) error = nil")
@@ -90,6 +133,18 @@ func TestResolveSessionConfig(t *testing.T) {
 		WithExecutionMode(ExecutionParallel),
 	}); err == nil {
 		t.Fatal("parallel DirectML error = nil")
+	}
+	if _, err := resolveSessionConfig([]SessionOption{
+		WithDirectML(0),
+		WithMemoryPattern(true),
+	}); err == nil {
+		t.Fatal("DirectML with memory patterns error = nil")
+	}
+	if _, err := resolveSessionConfig([]SessionOption{
+		WithCUDA(nil),
+		WithCUDA(nil),
+	}); err == nil {
+		t.Fatal("duplicate provider error = nil")
 	}
 }
 
