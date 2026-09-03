@@ -223,6 +223,93 @@ func TestFetchRetriesTransientResponses(t *testing.T) {
 	}
 }
 
+func TestFetchResumesInterruptedDownload(t *testing.T) {
+	t.Parallel()
+	contents := []byte("0123456789")
+	digest := sha256.Sum256(contents)
+	var requests atomic.Int32
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if requests.Add(1) == 1 {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Body:          &interruptingBody{data: contents[:4]},
+				ContentLength: -1,
+				Header:        make(http.Header),
+			}, nil
+		}
+		if got := request.Header.Get("Range"); got != "bytes=4-" {
+			t.Fatalf("Range = %q, want bytes=4-", got)
+		}
+		response := response(contents[4:])
+		response.StatusCode = http.StatusPartialContent
+		response.Status = "206 Partial Content"
+		response.Header.Set("Content-Range", "bytes 4-9/10")
+		return response, nil
+	})}
+	cache := t.TempDir()
+	client, err := New(WithCacheDir(cache), WithHTTPClient(httpClient), WithRetries(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := Artifact{
+		Name: "model.onnx", URL: "https://example.com/model.onnx",
+		SHA256: hex.EncodeToString(digest[:]), Size: int64(len(contents)),
+	}
+	path, err := client.Fetch(t.Context(), artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, contents) || requests.Load() != 2 {
+		t.Fatalf("download = %q, requests = %d", got, requests.Load())
+	}
+	if _, err := os.Stat(path + ".partial"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial download remains: %v", err)
+	}
+}
+
+func TestFetchRestartsWhenServerIgnoresRange(t *testing.T) {
+	t.Parallel()
+	contents := []byte("complete model")
+	digest := sha256.Sum256(contents)
+	digestText := hex.EncodeToString(digest[:])
+	cache := t.TempDir()
+	target := filepath.Join(cache, digestText, "model.onnx")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target+".partial", contents[:4], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get("Range"); got != "bytes=4-" {
+			t.Fatalf("Range = %q, want bytes=4-", got)
+		}
+		return response(contents), nil
+	})}
+	client, err := New(WithCacheDir(cache), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := client.Fetch(t.Context(), Artifact{
+		Name: "model.onnx", URL: "https://example.com/model.onnx", SHA256: digestText, Size: int64(len(contents)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, contents) {
+		t.Fatalf("download = %q, want %q", got, contents)
+	}
+}
+
 func TestFetchDoesNotRetryPermanentResponses(t *testing.T) {
 	t.Parallel()
 	digest := sha256.Sum256([]byte("model"))
@@ -388,6 +475,21 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
 }
+
+type interruptingBody struct {
+	data []byte
+	done bool
+}
+
+func (body *interruptingBody) Read(destination []byte) (int, error) {
+	if body.done {
+		return 0, io.ErrUnexpectedEOF
+	}
+	body.done = true
+	return copy(destination, body.data), io.ErrUnexpectedEOF
+}
+
+func (*interruptingBody) Close() error { return nil }
 
 func response(contents []byte) *http.Response {
 	return &http.Response{

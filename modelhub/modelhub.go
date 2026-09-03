@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -533,15 +534,36 @@ func replaceDirectory(source, target string) error {
 	return os.RemoveAll(stale)
 }
 
-func (c *Client) download(ctx context.Context, artifact Artifact, digest, target string) error {
+func (c *Client) download(ctx context.Context, artifact Artifact, digest, target string) (resultErr error) {
+	partial := target + ".partial"
+	if err := preparePartial(partial); err != nil {
+		return fmt.Errorf("modelhub: prepare partial download: %w", err)
+	}
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		var retryable *retryableDownloadError
+		if (errors.As(resultErr, &retryable) && !retryable.reset) || errors.Is(resultErr, context.Canceled) {
+			return
+		}
+		if removeErr := os.Remove(partial); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("modelhub: remove partial download: %w", removeErr))
+		}
+	}()
 	for attempt := 0; ; attempt++ {
-		err := c.downloadOnce(ctx, artifact, digest, target, attempt+1)
+		err := c.downloadOnce(ctx, artifact, digest, target, partial, attempt+1)
 		if err == nil {
 			return nil
 		}
 		var retryable *retryableDownloadError
 		if attempt >= c.retries || !errors.As(err, &retryable) {
 			return err
+		}
+		if retryable.reset {
+			if removeErr := os.Remove(partial); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				return errors.Join(err, fmt.Errorf("modelhub: reset partial download: %w", removeErr))
+			}
 		}
 		delay := retryable.delay
 		if delay <= 0 {
@@ -560,6 +582,7 @@ func (c *Client) download(ctx context.Context, artifact Artifact, digest, target
 type retryableDownloadError struct {
 	err   error
 	delay time.Duration
+	reset bool
 }
 
 func (e *retryableDownloadError) Error() string {
@@ -573,14 +596,38 @@ func (e *retryableDownloadError) Unwrap() error {
 func (c *Client) downloadOnce(
 	ctx context.Context,
 	artifact Artifact,
-	digest, target string,
+	digest, target, partial string,
 	attempt int,
 ) (resultErr error) {
+	offset, err := partialSize(partial)
+	if err != nil {
+		return fmt.Errorf("modelhub: inspect partial download: %w", err)
+	}
+	if offset > c.maxSize || artifact.Size > 0 && offset > artifact.Size {
+		if removeErr := os.Remove(partial); removeErr != nil {
+			return fmt.Errorf("modelhub: discard oversized partial download: %w", removeErr)
+		}
+		offset = 0
+	}
+	if artifact.Size > 0 && offset == artifact.Size {
+		if installErr := installPartial(partial, target, artifact, digest); installErr == nil {
+			return nil
+		}
+		if removeErr := os.Remove(partial); removeErr != nil {
+			return fmt.Errorf("modelhub: discard corrupt partial download: %w", removeErr)
+		}
+		offset = 0
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
 	if err != nil {
 		return fmt.Errorf("modelhub: create request: %w", err)
 	}
-	request.Header = c.headers.Clone()
+	if len(c.headers) > 0 {
+		request.Header = c.headers.Clone()
+	}
+	if offset > 0 {
+		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
 	response, err := c.client.Do(request)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -589,7 +636,7 @@ func (c *Client) downloadOnce(
 		return &retryableDownloadError{err: fmt.Errorf("modelhub: download %s: %w", artifact.Name, err)}
 	}
 	defer func() { resultErr = errors.Join(resultErr, response.Body.Close()) }()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusPartialContent {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 		httpErr := &HTTPError{URL: artifact.URL, Status: response.Status, StatusCode: response.StatusCode}
 		if retryableStatus(response.StatusCode) {
@@ -597,64 +644,191 @@ func (c *Client) downloadOnce(
 		}
 		return httpErr
 	}
-	if response.ContentLength > c.maxSize {
+	total := response.ContentLength
+	if response.StatusCode == http.StatusPartialContent {
+		start, end, rangeTotal, rangeErr := parseContentRange(response.Header.Get("Content-Range"))
+		if rangeErr != nil || start != offset {
+			return &retryableDownloadError{
+				err:   fmt.Errorf("modelhub: invalid Content-Range %q", response.Header.Get("Content-Range")),
+				reset: true,
+			}
+		}
+		if response.ContentLength >= 0 && response.ContentLength != end-start+1 {
+			return &retryableDownloadError{err: errors.New("modelhub: partial response length does not match Content-Range"), reset: true}
+		}
+		total = rangeTotal
+		if artifact.Size > 0 && rangeTotal >= 0 && rangeTotal != artifact.Size {
+			return &retryableDownloadError{err: fmt.Errorf("modelhub: partial response reports %d bytes, want %d", rangeTotal, artifact.Size), reset: true}
+		}
+	} else if offset > 0 {
+		// The server ignored Range. Restart safely with the complete response.
+		offset = 0
+	}
+	if total >= 0 && total > c.maxSize {
 		return fmt.Errorf("modelhub: download %s exceeds the %d-byte limit", artifact.Name, c.maxSize)
 	}
-	if artifact.Size > 0 && response.ContentLength >= 0 && response.ContentLength != artifact.Size {
-		return fmt.Errorf("modelhub: download %s reports %d bytes, want %d", artifact.Name, response.ContentLength, artifact.Size)
+	if artifact.Size > 0 && total >= 0 && total != artifact.Size {
+		return fmt.Errorf("modelhub: download %s reports %d bytes, want %d", artifact.Name, total, artifact.Size)
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(target), ".download-*")
+	temporary, err := os.OpenFile(partial, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("modelhub: create temporary file: %w", err)
+		return fmt.Errorf("modelhub: open partial download: %w", err)
 	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		if removeErr := os.Remove(temporaryPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			resultErr = errors.Join(resultErr, fmt.Errorf("modelhub: remove temporary file: %w", removeErr))
-		}
-	}()
-
 	hasher := sha256.New()
+	if offset == 0 {
+		if err := temporary.Truncate(0); err != nil {
+			_ = temporary.Close()
+			return fmt.Errorf("modelhub: reset partial download: %w", err)
+		}
+	} else {
+		if _, err := io.CopyN(hasher, temporary, offset); err != nil {
+			_ = temporary.Close()
+			return &retryableDownloadError{err: fmt.Errorf("modelhub: hash partial download: %w", err), reset: true}
+		}
+	}
+	if _, err := temporary.Seek(offset, io.SeekStart); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("modelhub: seek partial download: %w", err)
+	}
 	writer := io.Writer(temporary)
 	if c.progress != nil {
-		total := response.ContentLength
 		if artifact.Size > 0 {
 			total = artifact.Size
 		}
-		c.progress(Progress{Artifact: artifact, Total: total, Attempt: attempt})
+		c.progress(Progress{Artifact: artifact, Downloaded: offset, Total: total, Attempt: attempt})
 		writer = &progressWriter{
-			writer:   temporary,
-			artifact: artifact,
-			total:    total,
-			attempt:  attempt,
-			progress: c.progress,
+			writer:     temporary,
+			artifact:   artifact,
+			total:      total,
+			attempt:    attempt,
+			downloaded: offset,
+			progress:   c.progress,
 		}
 	}
-	written, copyErr := copyLimited(writer, hasher, response.Body, c.maxSize)
+	written, copyErr := copyLimited(writer, hasher, response.Body, c.maxSize-offset)
+	written += offset
 	if copyErr == nil {
 		copyErr = temporary.Sync()
 	}
 	closeErr := temporary.Close()
 	if copyErr != nil {
-		return errors.Join(fmt.Errorf("modelhub: download %s: %w", artifact.Name, copyErr), closeErr)
+		downloadErr := errors.Join(fmt.Errorf("modelhub: download %s: %w", artifact.Name, copyErr), closeErr)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return errors.Join(ctxErr, downloadErr)
+		}
+		return &retryableDownloadError{err: downloadErr}
 	}
 	if closeErr != nil {
 		return fmt.Errorf("modelhub: close downloaded file: %w", closeErr)
 	}
 	if artifact.Size > 0 && written != artifact.Size {
-		return fmt.Errorf("modelhub: download %s contains %d bytes, want %d", artifact.Name, written, artifact.Size)
+		return &retryableDownloadError{err: fmt.Errorf("modelhub: download %s contains %d bytes, want %d", artifact.Name, written, artifact.Size)}
 	}
 	actualDigest := hex.EncodeToString(hasher.Sum(nil))
 	if actualDigest != digest {
-		return fmt.Errorf("modelhub: SHA-256 mismatch for %s: got %s, want %s", artifact.Name, actualDigest, digest)
+		return &retryableDownloadError{
+			err:   fmt.Errorf("modelhub: SHA-256 mismatch for %s: got %s, want %s", artifact.Name, actualDigest, digest),
+			reset: true,
+		}
 	}
-	if err := os.Chmod(temporaryPath, 0o644); err != nil {
+	if err := os.Chmod(partial, 0o644); err != nil {
 		return fmt.Errorf("modelhub: set artifact permissions: %w", err)
 	}
-	if err := atomicfile.Replace(temporaryPath, target); err != nil {
+	if err := atomicfile.Replace(partial, target); err != nil {
 		return fmt.Errorf("modelhub: cache artifact: %w", err)
 	}
 	return nil
+}
+
+func preparePartial(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode().IsRegular() {
+		return nil
+	}
+	return os.Remove(path)
+}
+
+func partialSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return 0, errors.New("partial download is not a regular file")
+	}
+	return info.Size(), nil
+}
+
+func installPartial(path, target string, artifact Artifact, digest string) (resultErr error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if file != nil {
+			resultErr = errors.Join(resultErr, file.Close())
+		}
+	}()
+	hasher := sha256.New()
+	written, err := io.Copy(hasher, file)
+	if err != nil {
+		return err
+	}
+	if artifact.Size > 0 && written != artifact.Size {
+		return fmt.Errorf("download contains %d bytes, want %d", written, artifact.Size)
+	}
+	actualDigest := hex.EncodeToString(hasher.Sum(nil))
+	if actualDigest != digest {
+		return fmt.Errorf("SHA-256 mismatch: got %s, want %s", actualDigest, digest)
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	file = nil
+	if err := os.Chmod(path, 0o644); err != nil {
+		return err
+	}
+	return atomicfile.Replace(path, target)
+}
+
+func parseContentRange(value string) (start, end, total int64, resultErr error) {
+	unit, value, ok := strings.Cut(value, " ")
+	if !ok || unit != "bytes" {
+		return 0, 0, 0, errors.New("invalid unit")
+	}
+	interval, totalText, ok := strings.Cut(value, "/")
+	if !ok {
+		return 0, 0, 0, errors.New("missing total")
+	}
+	startText, endText, ok := strings.Cut(interval, "-")
+	if !ok {
+		return 0, 0, 0, errors.New("invalid interval")
+	}
+	start, err := strconv.ParseInt(startText, 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, 0, errors.New("invalid start")
+	}
+	end, err = strconv.ParseInt(endText, 10, 64)
+	if err != nil || end < start {
+		return 0, 0, 0, errors.New("invalid end")
+	}
+	total = -1
+	if totalText != "*" {
+		total, err = strconv.ParseInt(totalText, 10, 64)
+		if err != nil || total <= end {
+			return 0, 0, 0, errors.New("invalid total")
+		}
+	}
+	return start, end, total, nil
 }
 
 type progressWriter struct {
