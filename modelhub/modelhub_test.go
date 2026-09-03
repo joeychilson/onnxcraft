@@ -284,6 +284,43 @@ func TestFetchBundleKeepsFilesAdjacent(t *testing.T) {
 			t.Fatalf("%s = %q", name, data)
 		}
 	}
+	marker, err := os.ReadFile(filepath.Join(result.Directory, ".verified"))
+	if err != nil || len(strings.TrimSpace(string(marker))) != sha256.Size*2 {
+		t.Fatalf("bundle marker = %q, %v", marker, err)
+	}
+}
+
+func TestFetchBundleDoesNotExposePartialDirectory(t *testing.T) {
+	t.Parallel()
+	cache := t.TempDir()
+	good := []byte("good")
+	digest := sha256.Sum256(good)
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(request.URL.Path, "bad") {
+			return response([]byte("bad")), nil
+		}
+		return response(good), nil
+	})}
+	client, err := New(WithCacheDir(cache), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := []Artifact{
+		{Name: "good", URL: "https://example.com/good", SHA256: hex.EncodeToString(digest[:]), Size: int64(len(good))},
+		{Name: "bad", URL: "https://example.com/bad", SHA256: hex.EncodeToString(digest[:]), Size: int64(len(good))},
+	}
+	if _, fetchErr := client.FetchBundle(t.Context(), Bundle{Name: "transaction", Artifacts: artifacts}); fetchErr == nil {
+		t.Fatal("FetchBundle() error = nil")
+	}
+	entries, err := os.ReadDir(filepath.Join(cache, "bundles"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			t.Fatalf("FetchBundle() exposed partial directory %q", entry.Name())
+		}
+	}
 }
 
 func TestCatalogArtifactsAreValidAndPinned(t *testing.T) {

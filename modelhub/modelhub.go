@@ -364,26 +364,120 @@ func (c *Client) FetchBundle(ctx context.Context, bundle Bundle) (BundlePaths, e
 	}
 	key := hex.EncodeToString(hasher.Sum(nil))
 	directory := filepath.Join(c.cacheDir, "bundles", bundle.Name+"-"+key[:16])
-	result := BundlePaths{Directory: directory, Files: make(map[string]string, len(bundle.Artifacts))}
-	targets := make([]string, len(bundle.Artifacts))
-	errorsByIndex := parallel(c.concurrency, len(bundle.Artifacts), func(index int) error {
-		artifact := bundle.Artifacts[index]
-		target := filepath.Join(directory, artifact.Name)
-		if err := c.fetchTarget(ctx, artifact, digests[index], target); err != nil {
-			return fmt.Errorf("modelhub: fetch bundle artifact %q: %w", artifact.Name, err)
-		}
-		targets[index] = target
-		return nil
-	})
-	for _, err := range errorsByIndex {
-		if err != nil {
-			return BundlePaths{}, err
-		}
+	if validBundle(directory, bundle.Artifacts, digests, key) {
+		return bundlePaths(directory, bundle.Artifacts), nil
 	}
+	parent := filepath.Dir(directory)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return BundlePaths{}, fmt.Errorf("modelhub: create bundle cache: %w", err)
+	}
+	unlock := lockArtifact(directory)
+	defer unlock()
+	processLock, err := filelock.Acquire(ctx, directory+".lock")
+	if err != nil {
+		return BundlePaths{}, fmt.Errorf("modelhub: lock bundle cache: %w", err)
+	}
+	defer func() { _ = processLock.Close() }()
+	if validBundle(directory, bundle.Artifacts, digests, key) {
+		return bundlePaths(directory, bundle.Artifacts), nil
+	}
+
+	sources, err := c.FetchAll(ctx, bundle.Artifacts)
+	if err != nil {
+		return BundlePaths{}, err
+	}
+	temporary, err := os.MkdirTemp(parent, ".bundle-*")
+	if err != nil {
+		return BundlePaths{}, fmt.Errorf("modelhub: create temporary bundle: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(temporary) }()
 	for index, artifact := range bundle.Artifacts {
-		result.Files[artifact.Name] = targets[index]
+		target := filepath.Join(temporary, artifact.Name)
+		if err := linkOrCopy(sources[index], target); err != nil {
+			return BundlePaths{}, fmt.Errorf("modelhub: install bundle artifact %q: %w", artifact.Name, err)
+		}
 	}
-	return result, nil
+	if err := atomicfile.Write(filepath.Join(temporary, ".verified"), []byte(key+"\n"), 0o644); err != nil {
+		return BundlePaths{}, fmt.Errorf("modelhub: write bundle marker: %w", err)
+	}
+	if err := replaceDirectory(temporary, directory); err != nil {
+		return BundlePaths{}, fmt.Errorf("modelhub: install bundle: %w", err)
+	}
+	return bundlePaths(directory, bundle.Artifacts), nil
+}
+
+func validBundle(directory string, artifacts []Artifact, digests []string, key string) bool {
+	marker, err := os.ReadFile(filepath.Join(directory, ".verified"))
+	if err != nil || strings.TrimSpace(string(marker)) != key {
+		return false
+	}
+	for index, artifact := range artifacts {
+		valid, err := validFile(filepath.Join(directory, artifact.Name), artifact, digests[index])
+		if err != nil || !valid {
+			return false
+		}
+	}
+	return true
+}
+
+func bundlePaths(directory string, artifacts []Artifact) BundlePaths {
+	result := BundlePaths{Directory: directory, Files: make(map[string]string, len(artifacts))}
+	for _, artifact := range artifacts {
+		result.Files[artifact.Name] = filepath.Join(directory, artifact.Name)
+	}
+	return result
+}
+
+func linkOrCopy(source, target string) (resultErr error) {
+	if err := os.Link(source, target); err == nil {
+		return nil
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, input.Close()) }()
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		_ = output.Close()
+		return err
+	}
+	return output.Close()
+}
+
+func replaceDirectory(source, target string) error {
+	if err := os.Rename(source, target); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(target); err != nil {
+		return err
+	}
+	placeholder, err := os.CreateTemp(filepath.Dir(target), ".stale-bundle-*")
+	if err != nil {
+		return err
+	}
+	stale := placeholder.Name()
+	if err := placeholder.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(stale); err != nil {
+		return err
+	}
+	if err := os.Rename(target, stale); err != nil {
+		return err
+	}
+	if err := os.Rename(source, target); err != nil {
+		_ = os.Rename(stale, target)
+		return err
+	}
+	return os.RemoveAll(stale)
 }
 
 func (c *Client) download(ctx context.Context, artifact Artifact, digest, target string) error {
