@@ -14,7 +14,11 @@ func TestRuntimeIntegration(t *testing.T) {
 	if os.Getenv("INFERGO_INTEGRATION") == "" {
 		t.Skip("set INFERGO_INTEGRATION=1 to download and load the native runtime")
 	}
-	runtime, err := Open(t.Context(), WithCacheDir(t.TempDir()))
+	cacheDir := os.Getenv("INFERGO_CACHE_DIR")
+	if cacheDir == "" {
+		cacheDir = t.TempDir()
+	}
+	runtime, err := Open(t.Context(), WithCacheDir(cacheDir))
 	if err != nil {
 		t.Fatal(err)
 	}

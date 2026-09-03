@@ -155,6 +155,8 @@ Run the native ONNX Runtime integration test with:
 INFERGO_INTEGRATION=1 go test ./...
 ```
 
+Set `INFERGO_CACHE_DIR` to reuse a downloaded runtime across runs.
+
 ## License
 
 [MIT](LICENSE)

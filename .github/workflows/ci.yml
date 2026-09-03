@@ -46,6 +46,28 @@ jobs:
       - name: Build
         run: go build ./...
 
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      INFERGO_CACHE_DIR: ${{ github.workspace }}/.cache/infergo
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache ONNX Runtime
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.INFERGO_CACHE_DIR }}
+          key: onnxruntime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime.go', 'runtime_assets.go') }}
+      - name: Test with native runtime
+        env:
+          INFERGO_INTEGRATION: "1"
+        run: go test -race -count=1 -shuffle=on ./...
+
   vulnerability:
     name: Vulnerability scan
     runs-on: ubuntu-latest
