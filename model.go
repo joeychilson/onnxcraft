@@ -78,6 +78,23 @@ func (r *Runtime) Inspect(modelPath string, options ...SessionOption) (result Mo
 	return ModelInfo{Inputs: convertValueInfo(inputs), Outputs: convertValueInfo(outputs)}, nil
 }
 
+// InspectBytes reads ordered inputs and outputs from an in-memory ONNX model.
+func (r *Runtime) InspectBytes(model []byte) (result ModelInfo, resultErr error) {
+	if len(model) == 0 {
+		return ModelInfo{}, errors.New("infergo: model data cannot be empty")
+	}
+	release, err := r.retain()
+	if err != nil {
+		return ModelInfo{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, release()) }()
+	inputs, outputs, err := ort.GetInputOutputInfoWithONNXData(model)
+	if err != nil {
+		return ModelInfo{}, fmt.Errorf("infergo: inspect in-memory model graph: %w", err)
+	}
+	return ModelInfo{Inputs: convertValueInfo(inputs), Outputs: convertValueInfo(outputs)}, nil
+}
+
 // Load inspects modelPath and creates a session using every graph input and
 // output in model order. Use NewSession when only selected outputs are needed.
 func (r *Runtime) Load(modelPath string, options ...SessionOption) (*Session, error) {
@@ -86,6 +103,24 @@ func (r *Runtime) Load(modelPath string, options ...SessionOption) (*Session, er
 		return nil, err
 	}
 	return r.NewSessionFromInfo(modelPath, info, options...)
+}
+
+// LoadBytes inspects an in-memory ONNX model and creates a schema-aware
+// session using every graph input and output.
+func (r *Runtime) LoadBytes(model []byte, options ...SessionOption) (*Session, error) {
+	info, err := r.InspectBytes(model)
+	if err != nil {
+		return nil, err
+	}
+	session, err := r.NewSessionFromBytes(model, valueNames(info.Inputs), valueNames(info.Outputs), options...)
+	if err != nil {
+		return nil, err
+	}
+	session.mu.Lock()
+	session.inputInfo = cloneValueInfo(info.Inputs)
+	session.outputInfo = cloneValueInfo(info.Outputs)
+	session.mu.Unlock()
+	return session, nil
 }
 
 func validateModelInfo(info ModelInfo) error {

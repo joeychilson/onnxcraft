@@ -108,6 +108,13 @@ func TestRuntimeIntegration(t *testing.T) {
 	if len(session.Inputs()) != 1 || len(session.Outputs()) != 1 {
 		t.Fatalf("session schema = inputs %+v, outputs %+v", session.Inputs(), session.Outputs())
 	}
+	memorySession, err := runtime.LoadBytes(modelData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr := memorySession.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
 	if _, runErr := session.Run(t.Context(), MustTensor([]int64{2, 9}, make([]float32, 18))); runErr == nil {
 		t.Fatal("Run() accepted an invalid fixed dimension")
 	}

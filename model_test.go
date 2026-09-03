@@ -70,3 +70,11 @@ func TestValidateTensorAgainstSchema(t *testing.T) {
 		t.Fatal("validateTensor(type) error = nil")
 	}
 }
+
+func TestInspectBytesRejectsEmptyModel(t *testing.T) {
+	t.Parallel()
+	var runtime *Runtime
+	if _, err := runtime.InspectBytes(nil); err == nil {
+		t.Fatal("InspectBytes() error = nil")
+	}
+}

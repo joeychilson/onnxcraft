@@ -366,6 +366,40 @@ func (r *Runtime) NewSession(
 	return session, nil
 }
 
+// NewSessionFromBytes loads an in-memory ONNX model with positional input and
+// output names. ONNX Runtime consumes model during construction; callers may
+// reuse or release the byte slice after this function returns.
+func (r *Runtime) NewSessionFromBytes(
+	model []byte,
+	inputNames []string,
+	outputNames []string,
+	options ...SessionOption,
+) (*Session, error) {
+	if len(model) == 0 {
+		return nil, errors.New("infergo: model data cannot be empty")
+	}
+	if err := validateNames("input", inputNames); err != nil {
+		return nil, err
+	}
+	if err := validateNames("output", outputNames); err != nil {
+		return nil, err
+	}
+	config, err := resolveSessionConfig(options)
+	if err != nil {
+		return nil, err
+	}
+	release, err := r.retain()
+	if err != nil {
+		return nil, err
+	}
+	session, err := newSessionFromBytes(model, inputNames, outputNames, config)
+	if err != nil {
+		return nil, errors.Join(err, release())
+	}
+	session.release = release
+	return session, nil
+}
+
 // NewSessionFromInfo loads modelPath using a previously inspected graph
 // schema. Inputs and outputs are validated on each run.
 func (r *Runtime) NewSessionFromInfo(
@@ -656,12 +690,33 @@ func newSession(modelPath string, inputNames, outputNames []string, config sessi
 	if destroyErr != nil {
 		return nil, errors.Join(fmt.Errorf("infergo: close session options: %w", destroyErr), raw.Destroy())
 	}
+	return makeSession(raw, inputNames, outputNames, config), nil
+}
+
+func newSessionFromBytes(model []byte, inputNames, outputNames []string, config sessionConfig) (*Session, error) {
+	options, err := newORTSessionOptions(config)
+	if err != nil {
+		return nil, err
+	}
+	raw, loadErr := ort.NewDynamicAdvancedSessionWithONNXData(model, inputNames, outputNames, options)
+	runtime.KeepAlive(model)
+	destroyErr := options.Destroy()
+	if loadErr != nil {
+		return nil, errors.Join(fmt.Errorf("infergo: load in-memory model: %w", loadErr), destroyErr)
+	}
+	if destroyErr != nil {
+		return nil, errors.Join(fmt.Errorf("infergo: close session options: %w", destroyErr), raw.Destroy())
+	}
+	return makeSession(raw, inputNames, outputNames, config), nil
+}
+
+func makeSession(raw *ort.DynamicAdvancedSession, inputNames, outputNames []string, config sessionConfig) *Session {
 	return &Session{
 		raw:         raw,
 		inputNames:  slices.Clone(inputNames),
 		outputNames: slices.Clone(outputNames),
 		serialize:   config.directML,
-	}, nil
+	}
 }
 
 func resolveSessionConfig(options []SessionOption) (sessionConfig, error) {

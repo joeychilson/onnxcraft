@@ -171,3 +171,11 @@ func TestRunNamedValidatesNames(t *testing.T) {
 		t.Fatal("RunNamed() unknown-input error = nil")
 	}
 }
+
+func TestNewSessionFromBytesRejectsEmptyModel(t *testing.T) {
+	t.Parallel()
+	var runtime *Runtime
+	if _, err := runtime.NewSessionFromBytes(nil, []string{"input"}, []string{"output"}); err == nil {
+		t.Fatal("NewSessionFromBytes() error = nil")
+	}
+}
