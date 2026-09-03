@@ -1,0 +1,36 @@
+name: Catalog models
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-models
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    name: End-to-end inference
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      INFERGO_CACHE_DIR: ${{ github.workspace }}/.cache/infergo
+      INFERGO_MODEL_INTEGRATION: "1"
+      GOEXPERIMENT: cgocheck2
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.27.1"
+          cache: true
+      - name: Cache runtime and models
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ env.INFERGO_CACHE_DIR }}
+          key: catalog-models-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('runtime_assets.go', 'modelhub/catalog.go') }}
+      - name: Run catalog models
+        run: go test -race -count=1 -run '^TestCatalogModels$' .
