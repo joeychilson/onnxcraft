@@ -86,6 +86,37 @@ func TestDownloadArtifactRejectsBadResponses(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactRetriesTransientResponses(t *testing.T) {
+	t.Parallel()
+	content := []byte("runtime")
+	digest := sha256.Sum256(content)
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		requests++
+		status := http.StatusOK
+		body := content
+		if requests == 1 {
+			status = http.StatusServiceUnavailable
+			body = nil
+		}
+		return &http.Response{
+			Status: http.StatusText(status), StatusCode: status,
+			Body: io.NopCloser(strings.NewReader(string(body))), ContentLength: int64(len(body)), Header: make(http.Header),
+		}, nil
+	})}
+	path, err := downloadArtifactWithRetries(
+		t.Context(), client, "https://example.test/runtime", t.TempDir(),
+		hex.EncodeToString(digest[:]), int64(len(content)), 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
 func TestExtractLibrary(t *testing.T) {
 	t.Parallel()
 	for _, format := range []string{"zip", "tgz"} {
@@ -189,6 +220,9 @@ func TestRuntimeOptionsValidateInputs(t *testing.T) {
 	}
 	if err := WithHTTPClient(nil)(&config); err == nil {
 		t.Fatal("WithHTTPClient() error = nil")
+	}
+	if err := WithDownloadRetries(-1)(&config); err == nil {
+		t.Fatal("WithDownloadRetries() error = nil")
 	}
 }
 

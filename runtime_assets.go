@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/joeychilson/infergo/internal/atomicfile"
 	"github.com/joeychilson/infergo/internal/filelock"
@@ -108,13 +109,14 @@ func ensureRuntime(ctx context.Context, config runtimeConfig) (string, error) {
 		return libraryPath, nil
 	}
 
-	archiveFile, err := downloadArtifact(
+	archiveFile, err := downloadArtifactWithRetries(
 		ctx,
 		config.httpClient,
 		releaseBaseURL+"/"+artifact.archiveName,
 		runtimeDir,
 		artifact.digest,
 		artifact.size,
+		config.downloadRetries,
 	)
 	if err != nil {
 		return "", err
@@ -153,6 +155,46 @@ func ensureRuntime(ctx context.Context, config runtimeConfig) (string, error) {
 		return "", err
 	}
 	return libraryPath, nil
+}
+
+func downloadArtifactWithRetries(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	directory string,
+	expectedDigest string,
+	expectedSize int64,
+	retries int,
+) (string, error) {
+	for attempt := 0; ; attempt++ {
+		path, err := downloadArtifact(ctx, client, url, directory, expectedDigest, expectedSize)
+		if err == nil {
+			return path, nil
+		}
+		var retryable *runtimeDownloadError
+		if attempt >= retries || !errors.As(err, &retryable) {
+			return "", err
+		}
+		timer := time.NewTimer((100 * time.Millisecond) << attempt)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", errors.Join(ctx.Err(), err)
+		case <-timer.C:
+		}
+	}
+}
+
+type runtimeDownloadError struct {
+	err error
+}
+
+func (e *runtimeDownloadError) Error() string {
+	return e.err.Error()
+}
+
+func (e *runtimeDownloadError) Unwrap() error {
+	return e.err
 }
 
 func verifiedRuntimeExists(libraryPath, markerPath string) (bool, error) {
@@ -216,12 +258,19 @@ func downloadArtifact(
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("infergo: download ONNX Runtime: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		return "", &runtimeDownloadError{err: fmt.Errorf("infergo: download ONNX Runtime: %w", err)}
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-		return "", fmt.Errorf("infergo: download ONNX Runtime: unexpected HTTP status %s", response.Status)
+		statusErr := fmt.Errorf("infergo: download ONNX Runtime: unexpected HTTP status %s", response.Status)
+		if retryableHTTPStatus(response.StatusCode) {
+			return "", &runtimeDownloadError{err: statusErr}
+		}
+		return "", statusErr
 	}
 	if response.ContentLength >= 0 && response.ContentLength != expectedSize {
 		return "", fmt.Errorf("infergo: ONNX Runtime download size is %d bytes, want %d", response.ContentLength, expectedSize)
@@ -257,6 +306,17 @@ func downloadArtifact(
 	}
 	remove = false
 	return path, nil
+}
+
+func retryableHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func extractLibrary(archivePath, archiveName, libraryName string, destination *os.File) error {

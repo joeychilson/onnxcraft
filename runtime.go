@@ -42,10 +42,11 @@ type RuntimeInfo struct {
 type RuntimeOption func(*runtimeConfig) error
 
 type runtimeConfig struct {
-	cacheDir   string
-	library    string
-	httpClient *http.Client
-	offline    bool
+	cacheDir        string
+	library         string
+	httpClient      *http.Client
+	downloadRetries int
+	offline         bool
 }
 
 var environment struct {
@@ -95,6 +96,18 @@ func WithHTTPClient(client *http.Client) RuntimeOption {
 func WithOffline(enabled bool) RuntimeOption {
 	return func(config *runtimeConfig) error {
 		config.offline = enabled
+		return nil
+	}
+}
+
+// WithDownloadRetries sets the number of retries after a transient native
+// runtime download failure. The default is two.
+func WithDownloadRetries(count int) RuntimeOption {
+	return func(config *runtimeConfig) error {
+		if count < 0 || count > 10 {
+			return errors.New("infergo: download retries must be between zero and ten")
+		}
+		config.downloadRetries = count
 		return nil
 	}
 }
@@ -223,6 +236,7 @@ func defaultRuntimeConfig() runtimeConfig {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute,
 		},
+		downloadRetries: 2,
 	}
 }
 
