@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/joeychilson/infergo"
 	"github.com/joeychilson/infergo/bert"
@@ -296,7 +297,7 @@ func pool(values []float32, shape []int64, encoding bert.BatchEncoding, pooling 
 		result := make([][]float32, encoding.BatchSize)
 		for batchIndex := range result {
 			start := batchIndex * hiddenSize
-			result[batchIndex] = append([]float32(nil), values[start:start+hiddenSize]...)
+			result[batchIndex] = slices.Clone(values[start : start+hiddenSize])
 		}
 		return result, nil
 	}

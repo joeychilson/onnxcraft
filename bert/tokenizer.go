@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -283,9 +284,9 @@ func (t *Tokenizer) Pad(encoding Encoding, length int) (Encoding, error) {
 	if length < len(encoding.IDs) || len(encoding.IDs) != len(encoding.AttentionMask) || len(encoding.IDs) != len(encoding.Tokens) {
 		return Encoding{}, errors.New("bert: cannot pad malformed or oversized encoding")
 	}
-	encoding.IDs = append([]int64(nil), encoding.IDs...)
-	encoding.AttentionMask = append([]int64(nil), encoding.AttentionMask...)
-	encoding.Tokens = append([]string(nil), encoding.Tokens...)
+	encoding.IDs = slices.Clone(encoding.IDs)
+	encoding.AttentionMask = slices.Clone(encoding.AttentionMask)
+	encoding.Tokens = slices.Clone(encoding.Tokens)
 	paddingID := int64(t.vocabulary[t.special.Padding])
 	for len(encoding.IDs) < length {
 		encoding.IDs = append(encoding.IDs, paddingID)

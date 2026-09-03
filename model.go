@@ -3,6 +3,7 @@ package infergo
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	ort "github.com/yalue/onnxruntime_go"
 )
@@ -93,7 +94,7 @@ func convertValueInfo(source []ort.InputOutputInfo) []ValueInfo {
 		result[index] = ValueInfo{
 			Name:  info.Name,
 			Kind:  valueKind(info.OrtValueType),
-			Shape: append([]int64(nil), info.Dimensions...),
+			Shape: slices.Clone(info.Dimensions),
 			Type:  elementType(info.DataType),
 		}
 	}

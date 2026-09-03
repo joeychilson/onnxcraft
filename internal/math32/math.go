@@ -2,10 +2,10 @@
 package math32
 
 import (
+	"cmp"
 	"errors"
 	"math"
 	"slices"
-	"sort"
 )
 
 // Softmax returns normalized probabilities without mutating logits.
@@ -60,8 +60,8 @@ func TopK(values []float32, count int) []int {
 	for index := range indices {
 		indices[index] = index
 	}
-	sort.SliceStable(indices, func(left, right int) bool {
-		return values[indices[left]] > values[indices[right]]
+	slices.SortStableFunc(indices, func(left, right int) int {
+		return cmp.Compare(values[right], values[left])
 	})
 	return slices.Clone(indices[:count])
 }

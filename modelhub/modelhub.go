@@ -402,7 +402,7 @@ func copyLimited(destination io.Writer, hasher hash.Hash, source io.Reader, maxi
 		return written, err
 	}
 	if written > maximum {
-		return written, fmt.Errorf("artifact exceeds the %d-byte limit", maximum)
+		return written, fmt.Errorf("modelhub: artifact exceeds the %d-byte limit", maximum)
 	}
 	return written, nil
 }
@@ -418,13 +418,13 @@ func replace(source, target string) error {
 }
 
 func safePathParts(path string) ([]string, error) {
-	if path == "" || strings.Contains(path, `\\`) {
-		return nil, errors.New("invalid path")
+	if path == "" || strings.ContainsRune(path, '\\') {
+		return nil, errors.New("modelhub: invalid path")
 	}
 	parts := strings.Split(path, "/")
 	for _, part := range parts {
 		if part == "" || part == "." || part == ".." {
-			return nil, errors.New("invalid path")
+			return nil, errors.New("modelhub: invalid path")
 		}
 	}
 	return parts, nil

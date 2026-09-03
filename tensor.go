@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 )
 
 // TensorData is a Go type supported by an ONNX tensor.
@@ -67,8 +68,8 @@ func NewTensor[T TensorData](shape []int64, data []T) (Tensor, error) {
 	}
 
 	return Tensor{
-		shape:    append([]int64(nil), shape...),
-		data:     append([]T(nil), data...),
+		shape:    slices.Clone(shape),
+		data:     slices.Clone(data),
 		dataType: dataTypeOf[T](),
 	}, nil
 }
@@ -89,12 +90,12 @@ func Data[T TensorData](tensor Tensor) ([]T, error) {
 	if !ok {
 		return nil, fmt.Errorf("infergo: tensor contains %s, not %s", tensor.dataType, dataTypeOf[T]())
 	}
-	return append([]T(nil), data...), nil
+	return slices.Clone(data), nil
 }
 
 // Shape returns a copy of the tensor dimensions.
 func (t Tensor) Shape() []int64 {
-	return append([]int64(nil), t.shape...)
+	return slices.Clone(t.shape)
 }
 
 // Type returns the tensor element type.

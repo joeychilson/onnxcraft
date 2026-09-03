@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/joeychilson/infergo/internal/math32"
@@ -49,7 +50,7 @@ func Classify(logits []float32, options ClassificationOptions) ([]Classification
 		}
 	}
 
-	scores := append([]float32(nil), logits...)
+	scores := slices.Clone(logits)
 	if options.Softmax {
 		var err error
 		scores, err = math32.Softmax(logits)

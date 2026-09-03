@@ -37,6 +37,7 @@ type sessionConfig struct {
 // for active runs and is safe to call more than once.
 type Session struct {
 	mu          sync.RWMutex
+	active      sync.WaitGroup
 	raw         *ort.DynamicAdvancedSession
 	release     func() error
 	inputNames  []string
@@ -232,7 +233,9 @@ func (s *Session) InputNames() []string {
 	if s == nil {
 		return nil
 	}
-	return append([]string(nil), s.inputNames...)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.inputNames)
 }
 
 // OutputNames returns the model outputs in the positional order returned by Run.
@@ -240,7 +243,9 @@ func (s *Session) OutputNames() []string {
 	if s == nil {
 		return nil
 	}
-	return append([]string(nil), s.outputNames...)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.outputNames)
 }
 
 // Run executes the model with positional input tensors. Returned tensors own
@@ -257,19 +262,26 @@ func (s *Session) Run(ctx context.Context, inputs ...Tensor) (result []Tensor, r
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if s.raw == nil {
+		s.mu.RUnlock()
 		return nil, errors.New("infergo: session is closed")
 	}
-	if len(inputs) != len(s.inputNames) {
-		return nil, fmt.Errorf("infergo: got %d input tensors, want %d", len(inputs), len(s.inputNames))
+	s.active.Add(1)
+	raw := s.raw
+	inputNames := s.inputNames
+	outputNames := s.outputNames
+	s.mu.RUnlock()
+	defer s.active.Done()
+
+	if len(inputs) != len(inputNames) {
+		return nil, fmt.Errorf("infergo: got %d input tensors, want %d", len(inputs), len(inputNames))
 	}
 
 	inputValues := make([]ort.Value, len(inputs))
 	for index, input := range inputs {
 		value, err := toORTValue(input)
 		if err != nil {
-			return nil, errors.Join(fmt.Errorf("infergo: create input %q: %w", s.inputNames[index], err), destroyValues(inputValues))
+			return nil, errors.Join(fmt.Errorf("infergo: create input %q: %w", inputNames[index], err), destroyValues(inputValues))
 		}
 		inputValues[index] = value
 	}
@@ -281,8 +293,8 @@ func (s *Session) Run(ctx context.Context, inputs ...Tensor) (result []Tensor, r
 	}
 	defer func() { resultErr = errors.Join(resultErr, runOptions.Destroy()) }()
 
-	outputValues := make([]ort.Value, len(s.outputNames))
-	err = runWithContext(ctx, s.raw, inputValues, outputValues, runOptions)
+	outputValues := make([]ort.Value, len(outputNames))
+	err = runWithContext(ctx, raw, inputValues, outputValues, runOptions)
 	if err != nil {
 		return nil, errors.Join(err, destroyValues(outputValues))
 	}
@@ -292,7 +304,7 @@ func (s *Session) Run(ctx context.Context, inputs ...Tensor) (result []Tensor, r
 	for index, value := range outputValues {
 		output, err := fromORTValue(value)
 		if err != nil {
-			return nil, fmt.Errorf("infergo: read output %q: %w", s.outputNames[index], err)
+			return nil, fmt.Errorf("infergo: read output %q: %w", outputNames[index], err)
 		}
 		outputs[index] = output
 	}
@@ -305,16 +317,20 @@ func (s *Session) RunNamed(ctx context.Context, inputs map[string]Tensor) (map[s
 	if s == nil {
 		return nil, errors.New("infergo: nil session")
 	}
-	ordered := make([]Tensor, len(s.inputNames))
-	for index, name := range s.inputNames {
+	s.mu.RLock()
+	inputNames := slices.Clone(s.inputNames)
+	outputNames := slices.Clone(s.outputNames)
+	s.mu.RUnlock()
+	ordered := make([]Tensor, len(inputNames))
+	for index, name := range inputNames {
 		input, ok := inputs[name]
 		if !ok {
 			return nil, fmt.Errorf("infergo: missing input %q", name)
 		}
 		ordered[index] = input
 	}
-	known := make(map[string]struct{}, len(s.inputNames))
-	for _, name := range s.inputNames {
+	known := make(map[string]struct{}, len(inputNames))
+	for _, name := range inputNames {
 		known[name] = struct{}{}
 	}
 	unknown := make([]string, 0)
@@ -334,7 +350,7 @@ func (s *Session) RunNamed(ctx context.Context, inputs map[string]Tensor) (map[s
 	}
 	result := make(map[string]Tensor, len(outputs))
 	for index, output := range outputs {
-		result[s.outputNames[index]] = output
+		result[outputNames[index]] = output
 	}
 	return result, nil
 }
@@ -345,11 +361,15 @@ func (s *Session) Metadata() (result ModelMetadata, resultErr error) {
 		return ModelMetadata{}, errors.New("infergo: nil session")
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if s.raw == nil {
+		s.mu.RUnlock()
 		return ModelMetadata{}, errors.New("infergo: session is closed")
 	}
-	metadata, err := s.raw.GetModelMetadata()
+	s.active.Add(1)
+	raw := s.raw
+	s.mu.RUnlock()
+	defer s.active.Done()
+	metadata, err := raw.GetModelMetadata()
 	if err != nil {
 		return ModelMetadata{}, fmt.Errorf("infergo: read model metadata: %w", err)
 	}
@@ -392,15 +412,21 @@ func (s *Session) Close() error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.raw == nil {
+		s.mu.Unlock()
 		return nil
 	}
-	destroyErr := s.raw.Destroy()
+	raw := s.raw
 	s.raw = nil
-	releaseErr := s.release()
+	release := s.release
 	s.release = nil
-	return errors.Join(destroyErr, releaseErr)
+	s.mu.Unlock()
+	s.active.Wait()
+	destroyErr := raw.Destroy()
+	if release == nil {
+		return destroyErr
+	}
+	return errors.Join(destroyErr, release())
 }
 
 func newSession(modelPath string, inputNames, outputNames []string, config sessionConfig) (*Session, error) {
@@ -419,8 +445,8 @@ func newSession(modelPath string, inputNames, outputNames []string, config sessi
 	}
 	return &Session{
 		raw:         raw,
-		inputNames:  append([]string(nil), inputNames...),
-		outputNames: append([]string(nil), outputNames...),
+		inputNames:  slices.Clone(inputNames),
+		outputNames: slices.Clone(outputNames),
 	}, nil
 }
 
@@ -514,24 +540,14 @@ func runWithContext(
 		return nil
 	}
 
-	finished := make(chan struct{})
-	watcherDone := make(chan error, 1)
-	go func() {
-		select {
-		case <-ctx.Done():
-			watcherDone <- options.Terminate()
-		case <-finished:
-			watcherDone <- nil
-		}
-	}()
+	stop := context.AfterFunc(ctx, func() { _ = options.Terminate() })
+	defer stop()
 	runErr := session.RunWithOptions(inputs, outputs, options)
-	close(finished)
-	terminateErr := <-watcherDone
 	if err := ctx.Err(); err != nil {
-		return errors.Join(err, runErr, terminateErr)
+		return errors.Join(err, runErr)
 	}
-	if err := errors.Join(runErr, terminateErr); err != nil {
-		return fmt.Errorf("infergo: run model: %w", err)
+	if runErr != nil {
+		return fmt.Errorf("infergo: run model: %w", runErr)
 	}
 	return nil
 }

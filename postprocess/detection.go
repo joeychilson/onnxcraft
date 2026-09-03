@@ -1,12 +1,12 @@
 package postprocess
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"image"
 	"math"
 	"slices"
-	"sort"
 
 	"github.com/joeychilson/infergo/internal/math32"
 )
@@ -92,8 +92,8 @@ func DetectDETR(logits, boxes []float32, imageSize image.Point, options Detectio
 // It does not mutate detections.
 func NonMaxSuppression(detections []Detection, threshold float32) []Detection {
 	sorted := slices.Clone(detections)
-	sort.SliceStable(sorted, func(left, right int) bool {
-		return sorted[left].Score > sorted[right].Score
+	slices.SortStableFunc(sorted, func(left, right Detection) int {
+		return cmp.Compare(right.Score, left.Score)
 	})
 	result := make([]Detection, 0, len(sorted))
 	for _, candidate := range sorted {
