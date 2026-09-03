@@ -1,12 +1,62 @@
 package infergo
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 )
+
+func TestOpenRejectsCancelledContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := Open(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestOpenOfflineCacheMiss(t *testing.T) {
+	t.Parallel()
+	if _, supported := runtimeArtifacts[currentOS+"/"+currentArch]; !supported {
+		t.Skip("automatic runtime is unsupported on this platform")
+	}
+	_, err := Open(t.Context(), WithCacheDir(t.TempDir()), WithOffline(true))
+	if !errors.Is(err, ErrRuntimeNotCached) {
+		t.Fatalf("Open() error = %v, want ErrRuntimeNotCached", err)
+	}
+}
+
+func TestValidateLibraryResolvesSymlinks(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	target := filepath.Join(directory, "runtime")
+	link := filepath.Join(directory, "runtime-link")
+	if err := os.WriteFile(target, []byte("library"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("create symlink: %v", err)
+	}
+	got, err := validateLibrary(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(gotInfo, targetInfo) {
+		t.Fatalf("validateLibrary() = %q, want same file as %q", got, target)
+	}
+}
 
 const sumModelBase64 = "CAgSB3B5dG9yY2gaBTIuMS4yOqcCCkUSEW9ubng6OlJlZHVjZVN1bV8xGgpDb25zdGFudF8wIghDb25zdGFudCoaCgV2YWx1ZSoOCAEQB0oIAQAAAAAAAACgAQQKWgoNaW5wdXRfdmVjdG9ycwoRb25ueDo6UmVkdWNlU3VtXzESDm91dHB1dF9zY2FsYXJzGgovUmVkdWNlU3VtIglSZWR1Y2VTdW0qDwoIa2VlcGRpbXMYAKABAhIKbWFpbl9ncmFwaFo7Cg1pbnB1dF92ZWN0b3JzEioKKAgBEiQKHhIcaW5wdXRfdmVjdG9yc19keW5hbWljX2F4ZXNfMQoCCApiOQoOb3V0cHV0X3NjYWxhcnMSJwolCAESIQofEh1vdXRwdXRfc2NhbGFyc19keW5hbWljX2F4ZXNfMUICEBE="
 

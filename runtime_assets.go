@@ -89,6 +89,9 @@ func ensureRuntime(ctx context.Context, config runtimeConfig) (string, error) {
 	if valid {
 		return libraryPath, nil
 	}
+	if config.offline {
+		return "", fmt.Errorf("%w: %s/%s", ErrRuntimeNotCached, currentOS, currentArch)
+	}
 	if mkdirErr := os.MkdirAll(runtimeDir, 0o755); mkdirErr != nil {
 		return "", fmt.Errorf("infergo: create runtime cache: %w", mkdirErr)
 	}

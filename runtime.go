@@ -16,13 +16,18 @@ import (
 // RuntimeVersion is the native ONNX Runtime version used by infergo.
 const RuntimeVersion = "1.29.0"
 
+// ErrRuntimeNotCached is returned when offline mode cannot find a verified
+// bundled native runtime.
+var ErrRuntimeNotCached = errors.New("infergo: native runtime is not cached")
+
 // Runtime owns a reference to the process-wide ONNX Runtime environment.
 // Close is safe to call more than once. Sessions retain their own reference,
 // so closing Runtime does not invalidate sessions that are still open.
 type Runtime struct {
-	mu          sync.Mutex
-	libraryPath string
-	closed      bool
+	mu            sync.Mutex
+	libraryPath   string
+	loadedVersion string
+	closed        bool
 }
 
 // RuntimeInfo describes the native runtime selected for this process.
@@ -40,11 +45,14 @@ type runtimeConfig struct {
 	cacheDir   string
 	library    string
 	httpClient *http.Client
+	offline    bool
 }
 
 var environment struct {
 	sync.Mutex
 	libraryPath string
+	libraryInfo os.FileInfo
+	version     string
 	references  int
 }
 
@@ -82,11 +90,23 @@ func WithHTTPClient(client *http.Client) RuntimeOption {
 	}
 }
 
+// WithOffline disables native runtime downloads. A custom library or a
+// previously verified bundled runtime must be available.
+func WithOffline(enabled bool) RuntimeOption {
+	return func(config *runtimeConfig) error {
+		config.offline = enabled
+		return nil
+	}
+}
+
 // Open initializes ONNX Runtime. When no library path is provided, Open uses
 // ONNXRUNTIME_SHARED_LIBRARY_PATH or downloads a verified official artifact.
 func Open(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 	if ctx == nil {
 		return nil, errors.New("infergo: context cannot be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	config := defaultRuntimeConfig()
@@ -122,11 +142,12 @@ func Open(ctx context.Context, options ...RuntimeOption) (*Runtime, error) {
 		return nil, err
 	}
 	libraryPath = validatedPath
-	if err := acquireEnvironment(libraryPath); err != nil {
+	loadedVersion, err := acquireEnvironment(libraryPath)
+	if err != nil {
 		return nil, err
 	}
 
-	return &Runtime{libraryPath: libraryPath}, nil
+	return &Runtime{libraryPath: libraryPath, loadedVersion: loadedVersion}, nil
 }
 
 // Info returns details about the selected native runtime.
@@ -140,7 +161,7 @@ func (r *Runtime) Info() (RuntimeInfo, error) {
 		return RuntimeInfo{}, errors.New("infergo: runtime is closed")
 	}
 	return RuntimeInfo{
-		Version:     RuntimeVersion,
+		Version:     r.loadedVersion,
 		LibraryPath: r.libraryPath,
 		OS:          currentOS,
 		Arch:        currentArch,
@@ -157,7 +178,7 @@ func (r *Runtime) LoadedVersion() (string, error) {
 	if r.closed {
 		return "", errors.New("infergo: runtime is closed")
 	}
-	return ort.GetVersion(), nil
+	return r.loadedVersion, nil
 }
 
 // Close releases this Runtime's reference to the native environment.
@@ -170,8 +191,11 @@ func (r *Runtime) Close() error {
 	if r.closed {
 		return nil
 	}
+	if err := releaseEnvironment(); err != nil {
+		return err
+	}
 	r.closed = true
-	return releaseEnvironment()
+	return nil
 }
 
 func (r *Runtime) retain() (func() error, error) {
@@ -183,7 +207,7 @@ func (r *Runtime) retain() (func() error, error) {
 	if r.closed {
 		return nil, errors.New("infergo: runtime is closed")
 	}
-	if err := acquireEnvironment(r.libraryPath); err != nil {
+	if _, err := acquireEnvironment(r.libraryPath); err != nil {
 		return nil, err
 	}
 	var once sync.Once
@@ -207,41 +231,53 @@ func validateLibrary(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("infergo: resolve library path: %w", err)
 	}
-	info, err := os.Stat(absolute)
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("infergo: resolve ONNX Runtime library symlinks: %w", err)
+	}
+	info, err := os.Stat(resolved)
 	if err != nil {
 		return "", fmt.Errorf("infergo: inspect ONNX Runtime library: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("infergo: ONNX Runtime library %q is not a regular file", absolute)
+		return "", fmt.Errorf("infergo: ONNX Runtime library %q is not a regular file", resolved)
 	}
-	return absolute, nil
+	return resolved, nil
 }
 
-func acquireEnvironment(libraryPath string) error {
+func acquireEnvironment(libraryPath string) (string, error) {
 	environment.Lock()
 	defer environment.Unlock()
 	if environment.references > 0 {
-		if environment.libraryPath != libraryPath {
-			return fmt.Errorf("infergo: ONNX Runtime is already initialized with %q", environment.libraryPath)
+		sameLibrary := environment.libraryPath == libraryPath
+		if !sameLibrary {
+			info, err := os.Stat(libraryPath)
+			if err != nil {
+				return "", fmt.Errorf("infergo: inspect ONNX Runtime library: %w", err)
+			}
+			sameLibrary = os.SameFile(environment.libraryInfo, info)
+		}
+		if !sameLibrary {
+			return "", fmt.Errorf("infergo: ONNX Runtime is already initialized with %q", environment.libraryPath)
 		}
 		environment.references++
-		return nil
+		return environment.version, nil
 	}
 
+	libraryInfo, err := os.Stat(libraryPath)
+	if err != nil {
+		return "", fmt.Errorf("infergo: inspect ONNX Runtime library: %w", err)
+	}
 	ort.SetSharedLibraryPath(libraryPath)
 	if err := ort.InitializeEnvironment(ort.WithLogLevelError()); err != nil {
-		return fmt.Errorf("infergo: initialize ONNX Runtime: %w", err)
+		return "", fmt.Errorf("infergo: initialize ONNX Runtime: %w", err)
 	}
-	if version := ort.GetVersion(); version != RuntimeVersion {
-		destroyErr := ort.DestroyEnvironment()
-		return errors.Join(
-			fmt.Errorf("infergo: loaded ONNX Runtime %s, require %s", version, RuntimeVersion),
-			destroyErr,
-		)
-	}
+	version := ort.GetVersion()
 	environment.libraryPath = libraryPath
+	environment.libraryInfo = libraryInfo
+	environment.version = version
 	environment.references = 1
-	return nil
+	return version, nil
 }
 
 func releaseEnvironment() error {
@@ -250,13 +286,16 @@ func releaseEnvironment() error {
 	if environment.references == 0 {
 		return nil
 	}
-	environment.references--
-	if environment.references > 0 {
+	if environment.references > 1 {
+		environment.references--
 		return nil
 	}
-	environment.libraryPath = ""
 	if err := ort.DestroyEnvironment(); err != nil {
 		return fmt.Errorf("infergo: close ONNX Runtime: %w", err)
 	}
+	environment.references = 0
+	environment.libraryPath = ""
+	environment.libraryInfo = nil
+	environment.version = ""
 	return nil
 }
