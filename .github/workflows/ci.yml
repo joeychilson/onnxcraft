@@ -1,0 +1,75 @@
+name: CI
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            archive: onnxruntime-linux-x64-1.29.0.tgz
+            sha256: c3fddc4f139a045b0c4902c57410f0694f1c2fdf9b6939fbe38b1aeae7cd14ba
+            library: lib/libonnxruntime.so.1.29.0
+          - runner: ubuntu-24.04-arm
+            archive: onnxruntime-linux-aarch64-1.29.0.tgz
+            sha256: e1799098ebc054b370f6176a450f158720f297818c613e5dc99b92e2ec82346f
+            library: lib/libonnxruntime.so.1.29.0
+          - runner: macos-15
+            archive: onnxruntime-osx-arm64-1.29.0.tgz
+            sha256: d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92
+            library: lib/libonnxruntime.1.29.0.dylib
+          - runner: windows-2025
+            archive: onnxruntime-win-x64-1.29.0.zip
+            sha256: c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2
+            library: lib/onnxruntime.dll
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Install test runtime
+        shell: python
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          SHA256: ${{ matrix.sha256 }}
+          LIBRARY: ${{ matrix.library }}
+        run: |
+          import hashlib, os, pathlib, tarfile, urllib.request, zipfile
+          name = os.environ['ARCHIVE']
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / name
+          urllib.request.urlretrieve('https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/' + name, archive)
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == os.environ['SHA256'], 'runtime checksum mismatch'
+          destination = archive.parent / 'ort'
+          if name.endswith('.zip'):
+              with zipfile.ZipFile(archive) as source:
+                  source.extractall(destination)
+              directory = name.removesuffix('.zip')
+          else:
+              with tarfile.open(archive) as source:
+                  source.extractall(destination, filter='data')
+              directory = name.removesuffix('.tgz')
+          library = destination / directory / os.environ['LIBRARY']
+          assert library.is_file(), library
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'ONNXRUNTIME_SHARED_LIBRARY_PATH={library}\n')
+      - run: go vet ./...
+      - run: go mod tidy -diff
+      - name: Test native boundary and concurrency
+        env:
+          GOEXPERIMENT: cgocheck2
+        run: go test -race -shuffle=on ./...
+      - name: Test native memory access
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: go test -asan -count=1 ./...
